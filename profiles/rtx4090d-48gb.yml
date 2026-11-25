@@ -1,0 +1,94 @@
+# Profile for 48 GB RTX 4090 D (114 SMs, 300 W, sm_89) serving 27B-FP8 + DFlash2 + ReplaySSM.
+# Loopback-only bind (127.0.0.1); pair with SSH tunnel or local reverse proxy for external access.
+services:
+  sglang:
+    image: sglang-sm89:latest
+    container_name: sglang-sm89-rtx4090d-48gb
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:30000:30000'
+    ipc: host
+    shm_size: '8gb'
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      SGLANG_TIMEOUT_KEEP_ALIVE: '120'
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SGLANG_SM89_ENABLE: ${SGLANG_SM89_ENABLE:-1}
+      SGLANG_SM89_FP8_CONFIGS: ${SGLANG_SM89_FP8_CONFIGS:-1}
+      SGLANG_SM89_SYNTHESIZE_UNTUNED_FP8: ${SGLANG_SM89_SYNTHESIZE_UNTUNED_FP8:-0}
+      SGLANG_SM89_DFLASH_FP8: ${SGLANG_SM89_DFLASH_FP8:-1}
+      SGLANG_SM89_REPLAYSSM: ${SGLANG_SM89_REPLAYSSM:-1}
+      SGLANG_SM89_COUPLED_GRAMMAR: ${SGLANG_SM89_COUPLED_GRAMMAR:-1}
+      SGLANG_SM89_SPARSE_PROJ: ${SGLANG_SM89_SPARSE_PROJ:-1}
+      SGLANG_SM89_WY_GDN: ${SGLANG_SM89_WY_GDN:-1}
+      SGLANG_SM89_WY_GDN_MAX_BF16_TOKENS: ${SGLANG_SM89_WY_GDN_MAX_BF16_TOKENS:-32}
+      SGLANG_SM89_FP8_VERIFY_HEAD: ${SGLANG_SM89_FP8_VERIFY_HEAD:-0}
+      SGLANG_SM89_SAM_GRAFT: ${SGLANG_SM89_SAM_GRAFT:-0}
+    command:
+      - python
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - ${MODEL_PATH:-Qwen/Qwen3.8-27B-FP8}
+      - --host
+      - 0.0.0.0
+      - --port
+      - '30000'
+      - --quantization
+      - fp8
+      - --kv-cache-dtype
+      - ${SGLANG_KV_CACHE_DTYPE:-fp8_e4m3}
+      - --mem-fraction-static
+      - '0.90'
+      - --context-length
+      - '8192'
+      - --max-running-requests
+      - '8'
+      - --cuda-graph-max-bs-decode
+      - '8'
+      - --disable-prefill-cuda-graph
+      - --schedule-policy
+      - lpm
+      - --attention-backend
+      - flashinfer
+      - --linear-attn-backend
+      - triton
+      - --enable-linear-replayssm-spec
+      - --linear-replayssm-cache-len
+      - '16'
+      - --mamba-ssm-dtype
+      - bfloat16
+      - --mm-feature-transport
+      - cpu
+      - --speculative-algorithm
+      - DFLASH
+      - --speculative-draft-model-path
+      - ${DRAFT_MODEL_PATH:-z-lab/Qwen3.8-27B-DFlash2}
+      - --speculative-draft-model-quantization
+      - unquant
+      - --speculative-num-draft-tokens
+      - '8'
+      - --max-mamba-cache-size
+      - '40'
+      - --grammar-backend
+      - xgrammar
+      - --enable-dynamic-batch-tokenizer
+      - --enable-cache-report
+      - --enable-metrics
+    volumes:
+      - sglang-hf-cache:/root/.cache/huggingface
+      - sglang-torch-cache:/root/.cache/torch
+      - sglang-triton-cache:/root/.triton
+      - ${SGLANG_SM89_CONFIG_CACHE:-~/.cache/sglang-sm89/fp8_configs}:/root/.cache/sglang-sm89/fp8_configs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+volumes:
+  sglang-hf-cache:
+  sglang-torch-cache:
+  sglang-triton-cache:

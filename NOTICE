@@ -1,0 +1,9 @@
+sglang-sm89
+Copyright 2026 Mert Ozoner
+
+This software includes runtime plugins and CUDA sm_89 kernels engineered for
+SGLang (Apache-2.0, https://github.com/sgl-project/sglang) and interoperates
+with XGrammar and Triton Block-FP8 / Gated DeltaNet execution backends.
+
+All hooks register dynamically via SGLang's HookRegistry without patching
+upstream SGLang source files in place.

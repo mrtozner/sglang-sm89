@@ -1,0 +1,160 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090 D",
+  "torch": "2.14.1+cu130",
+  "cuda": "13.0",
+  "max_torch_memory_allocated_bytes": 5104188928,
+  "passed": true,
+  "gates": [
+    {
+      "gate": "gate2_unified64_sparse_vocab_proj",
+      "passed": true,
+      "n_main": 248320,
+      "tail_parity": [
+        {
+          "n": 2051,
+          "m": 1,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 12.288,
+            "p95_us": 27.648,
+            "min_us": 11.264
+          },
+          "fp8_timing": {
+            "median_us": 9.216,
+            "p95_us": 9.216,
+            "min_us": 8.192
+          },
+          "correct": true
+        },
+        {
+          "n": 2051,
+          "m": 8,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 38.912,
+            "p95_us": 39.936,
+            "min_us": 33.792
+          },
+          "fp8_timing": {
+            "median_us": 26.624,
+            "p95_us": 27.648,
+            "min_us": 20.48
+          },
+          "correct": true
+        },
+        {
+          "n": 2051,
+          "m": 64,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 113.664,
+            "p95_us": 114.688,
+            "min_us": 107.52
+          },
+          "fp8_timing": {
+            "median_us": 69.632,
+            "p95_us": 70.656,
+            "min_us": 64.512
+          },
+          "correct": true
+        },
+        {
+          "n": 2051,
+          "m": 256,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 442.368,
+            "p95_us": 443.392,
+            "min_us": 441.344
+          },
+          "fp8_timing": {
+            "median_us": 267.264,
+            "p95_us": 268.288,
+            "min_us": 266.24
+          },
+          "correct": true
+        },
+        {
+          "n": 2051,
+          "m": 257,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 473.088,
+            "p95_us": 474.112,
+            "min_us": 472.064
+          },
+          "fp8_timing": {
+            "median_us": 288.768,
+            "p95_us": 289.792,
+            "min_us": 287.744
+          },
+          "correct": true
+        },
+        {
+          "n": 2051,
+          "m": 289,
+          "bf16_exact": true,
+          "fp8_exact": true,
+          "bad_late_rows": 0,
+          "bf16_timing": {
+            "median_us": 482.304,
+            "p95_us": 482.304,
+            "min_us": 481.28
+          },
+          "fp8_timing": {
+            "median_us": 292.864,
+            "p95_us": 292.864,
+            "min_us": 291.84
+          },
+          "correct": true
+        }
+      ],
+      "mixed_64_unified_ok": true,
+      "mixed_64_max_diff": 0.00195,
+      "dispatch_cpp_numpy_agree": true,
+      "cpp_dispatch_timing": {
+        "median_us": 75.894,
+        "p95_us": 77.69,
+        "min_us": 74.801
+      },
+      "cudagraph_ok": true,
+      "cudagraph_max_diff": 0.00391,
+      "cold_dram_bench": [
+        {
+          "case": "sparse_r1",
+          "m": 1,
+          "n": 248320,
+          "dense_bf16_us": 2606.08,
+          "sparse_bf16_us": 27.648,
+          "speedup": 94.26
+        },
+        {
+          "case": "sparse_r8",
+          "m": 8,
+          "n": 248320,
+          "dense_bf16_us": 2684.928,
+          "sparse_bf16_us": 165.888,
+          "speedup": 16.19
+        },
+        {
+          "case": "mixed_56struct_8str_r64",
+          "m": 64,
+          "n": 248320,
+          "dense_bf16_us": 3081.216,
+          "sparse_bf16_us": 420.864,
+          "speedup": 7.32
+        }
+      ]
+    }
+  ]
+}

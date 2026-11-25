@@ -1,0 +1,136 @@
+{
+  "scope": "XGrammar tool-call packed bitmask dispatch",
+  "cpp_extension_loaded": true,
+  "platform": "Linux-6.17.0-23-generic-x86_64-with-glibc2.39",
+  "numpy": "2.3.5",
+  "torch": "2.14.1+cu130",
+  "config": {
+    "vocab_size": 248320,
+    "k_chunk": 8,
+    "max_eff_row_ratio": 0.55,
+    "repeats": 25,
+    "inner": 10,
+    "seed": 20261125,
+    "xgrammar_tokenizer": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+  },
+  "cases": [
+    {
+      "case": "tool_call_r8",
+      "shape": [
+        8,
+        7760
+      ],
+      "vocab_size": 248320,
+      "route": "dense",
+      "agree": true,
+      "active_pairs": 15531,
+      "active_tiles": 3877,
+      "union_active_tile_fraction": 0.999227,
+      "timings": {
+        "numpy_roofline": {
+          "p50_us": 352.647,
+          "p95_us": 359.414
+        },
+        "naive_scan": {
+          "p50_us": 13370.029,
+          "p95_us": 13384.575
+        },
+        "cpp_roofline": {
+          "p50_us": 10.506,
+          "p95_us": 10.766
+        }
+      },
+      "cpp_vs_numpy_speedup": 33.57,
+      "cpp_vs_naive_speedup": 1272.61
+    },
+    {
+      "case": "tool_call_r64",
+      "shape": [
+        64,
+        7760
+      ],
+      "vocab_size": 248320,
+      "route": "dense",
+      "agree": true,
+      "active_pairs": 112612,
+      "active_tiles": 3877,
+      "union_active_tile_fraction": 0.999227,
+      "timings": {
+        "numpy_roofline": {
+          "p50_us": 277.13,
+          "p95_us": 280.001
+        },
+        "naive_scan": {
+          "p50_us": 63734.055,
+          "p95_us": 63758.7
+        },
+        "cpp_roofline": {
+          "p50_us": 11.919,
+          "p95_us": 12.358
+        }
+      },
+      "cpp_vs_numpy_speedup": 23.25,
+      "cpp_vs_naive_speedup": 5347.27
+    },
+    {
+      "case": "tool_followup_r8",
+      "shape": [
+        8,
+        7760
+      ],
+      "vocab_size": 248320,
+      "route": "dense",
+      "agree": true,
+      "active_pairs": 15528,
+      "active_tiles": 3877,
+      "union_active_tile_fraction": 0.999227,
+      "timings": {
+        "numpy_roofline": {
+          "p50_us": 352.276,
+          "p95_us": 355.624
+        },
+        "naive_scan": {
+          "p50_us": 13336.742,
+          "p95_us": 13387.226
+        },
+        "cpp_roofline": {
+          "p50_us": 10.509,
+          "p95_us": 10.755
+        }
+      },
+      "cpp_vs_numpy_speedup": 33.52,
+      "cpp_vs_naive_speedup": 1269.08
+    },
+    {
+      "case": "tool_followup_r64",
+      "shape": [
+        64,
+        7760
+      ],
+      "vocab_size": 248320,
+      "route": "dense",
+      "agree": true,
+      "active_pairs": 109089,
+      "active_tiles": 3877,
+      "union_active_tile_fraction": 0.999227,
+      "timings": {
+        "numpy_roofline": {
+          "p50_us": 274.459,
+          "p95_us": 296.344
+        },
+        "naive_scan": {
+          "p50_us": 63338.685,
+          "p95_us": 64741.884
+        },
+        "cpp_roofline": {
+          "p50_us": 12.139,
+          "p95_us": 14.388
+        }
+      },
+      "cpp_vs_numpy_speedup": 22.61,
+      "cpp_vs_naive_speedup": 5217.78
+    }
+  ],
+  "xgrammar": "0.2.7",
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+}
