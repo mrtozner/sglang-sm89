@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sglang-sm89"
-version = "0.2.0"
+version = "0.3.0"
 description = "Ada Lovelace (sm_89) SGLang acceleration suite: live FP8 autotuner, GDN ReplaySSM bridge, WY GDN CUDA verify, coupled speculative grammar, and kTileV=64 sparse vocab projection"
 readme = "README.md"
 license = "Apache-2.0"

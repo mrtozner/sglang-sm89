@@ -1,0 +1,17 @@
+{
+  "bs": 8,
+  "block_size": 8,
+  "vocab_size": 248320,
+  "cpp_loaded": true,
+  "cpp": {
+    "total_p50_us": 1067.52,
+    "mock_fill_mask_p50_us": 938.08,
+    "refine_overhead_p50_us": 129.95
+  },
+  "python_fallback": {
+    "total_p50_us": 3706.37,
+    "mock_fill_mask_p50_us": 974.55,
+    "refine_overhead_p50_us": 2731.37
+  },
+  "refine_speedup_x": 21.02
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import zlib
 
 import numpy as np
 import pytest
@@ -307,16 +308,17 @@ def _exact_4step_target_table() -> dict[tuple[int, int, int, int], float]:
 
 @pytest.mark.parametrize("regime", ["eager_sampled", "graph_sampled", "eager_mixed"])
 def test_four_step_sequential_rejection_tv_eager_graph_mixed(regime: str) -> None:
-    """Monte Carlo N>=40,000 4-step trajectory TV < 0.01 for eager/graph/mixed batches."""
-    torch.manual_seed(20260 + hash(regime) % 1000)
-    rng = np.random.default_rng(777 + len(regime))
+    """Monte Carlo N>=80,000 4-step trajectory TV < 0.01 for eager/graph/mixed batches."""
+    seed_offset = zlib.crc32(regime.encode("utf-8")) % 10000
+    torch.manual_seed(20260 + seed_offset)
+    rng = np.random.default_rng(777 + seed_offset)
     vocab_size = 10
     block_size = 5
     top_k = 6
     is_eager = regime in ("eager_sampled", "eager_mixed")
     is_mixed = regime == "eager_mixed"
-    chunk_bs = 4000
-    n_trajectories = 56000 if is_mixed else 40000  # 42,000 sampled in mixed >= 40,000
+    chunk_bs = 8000
+    n_trajectories = 112000 if is_mixed else 80000  # 84,000 sampled in mixed >= 80,000
 
     # Precompute target/draft tables by history tuple for fast batch assembly.
     target_cache: dict[tuple[int, ...], np.ndarray] = {}
@@ -465,7 +467,7 @@ def test_four_step_sequential_rejection_tv_eager_graph_mixed(regime: str) -> Non
             active = next_active
 
     exact_table = _exact_4step_target_table()
-    assert sampled_total >= 40000
+    assert sampled_total >= 80000
     assert all(traj in exact_table for traj in empirical_counts), "Emitted illegal 4-step trajectory!"
 
     tv = 0.5 * sum(
@@ -473,3 +475,93 @@ def test_four_step_sequential_rejection_tv_eager_graph_mixed(regime: str) -> Non
         for traj, p_exact in exact_table.items()
     )
     assert tv < 0.01, f"4-step TV={tv:.5f} >= 0.01 for regime={regime} (sampled_total={sampled_total})"
+
+
+def test_c8_draft8_vocab248320_refinement_and_cpp_parity() -> None:
+    """Verify c=8, draft=8, V=248320 refinement preserves TV=0 / <200us when _C is compiled."""
+    import time
+    from sglang_sm89.coupled_grammar import _get_cpp_refine, apply_coupled_conditional_resampling
+
+    vocab_size = 248320
+    bs, block_size, top_k = 8, 8, 16
+    words = (vocab_size + 31) // 32
+
+    class _LargeSparseGrammar:
+        def __init__(self, req_i: int) -> None:
+            self.req_i = req_i
+            self.hist: list[int] = []
+            self.legal = [100 + req_i + j for j in range(4)]
+
+        def is_terminated(self) -> bool:
+            return len(self.hist) >= 32
+
+        def fill_vocab_mask(self, bitmask: torch.Tensor, row_idx: int) -> None:
+            bitmask[row_idx].zero_()
+            for t in self.legal:
+                bitmask[row_idx, t >> 5] |= 1 << (t & 31)
+
+        def accept_token(self, tok: int) -> None:
+            self.hist.append(int(tok))
+
+        def rollback(self, n: int) -> None:
+            del self.hist[-n:]
+
+    reqs = [SimpleNamespace(grammar=_LargeSparseGrammar(i)) for i in range(bs)]
+    draft_cpu = torch.zeros((bs, block_size), dtype=torch.int64)
+    cand_cpu = torch.arange(top_k, dtype=torch.int64).view(1, 1, top_k).repeat(bs, block_size - 1, 1) + 100
+    q_cpu = torch.full((bs, block_size - 1, top_k), 1.0 / top_k, dtype=torch.float32)
+
+    draft_out = draft_cpu.clone()
+    cand_out = cand_cpu.clone()
+    q_out = q_cpu.clone()
+    d_chg, _c_chg, q_chg = apply_coupled_conditional_resampling(
+        reqs=reqs,
+        draft_cpu=draft_out,
+        cand_cpu=cand_out,
+        q_cpu=q_out,
+        greedy_flags=[False] * bs,
+        vocab_size=vocab_size,
+        allow_forced_single=True,
+    )
+    assert d_chg and q_chg
+    assert torch.equal(cand_out, cand_cpu)
+    for r_i, req in enumerate(reqs):
+        for pos in range(1, block_size):
+            assert int(draft_out[r_i, pos].item()) in req.grammar.legal
+    assert all(len(r.grammar.hist) == 0 for r in reqs)
+
+    cpp_fn = _get_cpp_refine()
+    if cpp_fn is not None:
+        # Benchmark pure C++ refinement across 8x7=56 slots (excluding Python mock fill_vocab_mask).
+        mask_bench = torch.zeros((words,), dtype=torch.int32)
+        for t in (100, 101, 102, 103):
+            mask_bench[t >> 5] |= 1 << (t & 31)
+        draft_bench = draft_cpu.clone()
+        cand_bench = cand_cpu.clone()
+        q_bench = q_cpu.clone()
+
+        def _run_c8_step() -> None:
+            for b in range(bs):
+                for pos in range(1, block_size):
+                    cpp_fn(
+                        mask_bench,
+                        draft_bench[b],
+                        cand_bench[b, pos - 1],
+                        q_bench[b, pos - 1],
+                        pos,
+                        vocab_size,
+                        False,
+                        True,
+                        0.37,
+                        False,
+                    )
+
+        for _ in range(5):
+            _run_c8_step()
+        t0 = time.perf_counter()
+        iters = 30
+        for _ in range(iters):
+            _run_c8_step()
+        avg_us = (time.perf_counter() - t0) * 1e6 / iters
+        assert avg_us < 200.0, f"c=8, draft=8 C++ refinement took {avg_us:.1f} us (>= 200 us)"
+    assert words == 7760

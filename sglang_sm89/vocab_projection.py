@@ -1,4 +1,4 @@
-"""Clean-room Ada Lovelace (sm_89) sparse vocab projection and deferred verify dispatch."""
+"""Clean-room Ada Lovelace (sm_89) sparse vocab projection via LogitsProcessor._get_logits."""
 
 from __future__ import annotations
 
@@ -19,17 +19,17 @@ _EXT_LOAD_ATTEMPTED = False
 _EXT_LOADED = False
 
 
-class _DeferredVerifyTLS(threading.local):
+class _VerifyTicketTLS(threading.local):
     def __init__(self) -> None:
         super().__init__()
         self.pending: Optional[dict[str, Any]] = None
 
 
-_VERIFY_TLS = _DeferredVerifyTLS()
+_VERIFY_TLS = _VerifyTicketTLS()
 
 
 def ensure_extension_loaded() -> bool:
-    """Import compiled sglang_sm89._C CUDA extension once and verify torch.ops bindings."""
+    """Import compiled sglang_sm89._C extension once and verify torch.ops bindings."""
     global _EXT_LOAD_ATTEMPTED, _EXT_LOADED
     if _EXT_LOADED:
         return True
@@ -132,46 +132,35 @@ def select_sparse_vocab_proj(
     )
 
 
+def _prepare_sparse_out(hidden: torch.Tensor, weight: torch.Tensor, out: Optional[torch.Tensor]) -> torch.Tensor:
+    if not ensure_extension_loaded():
+        raise RuntimeError("sglang_sm89._C CUDA extension must be built for sparse_vocab_proj")
+    if out is not None:
+        return out
+    return torch.empty((hidden.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=hidden.device)
+
+
 def sparse_vocab_bf16_lm_head(
-    hidden: torch.Tensor,
-    weight: torch.Tensor,
-    vocab_mask: torch.Tensor,
-    out: Optional[torch.Tensor] = None,
+    hidden: torch.Tensor, weight: torch.Tensor, vocab_mask: torch.Tensor, out: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     """Compute BF16 hidden @ weight.T for active bitmask rows only (inactive -> -inf)."""
-    if not ensure_extension_loaded():
-        raise RuntimeError("sglang_sm89._C extension is required for sparse_vocab_bf16_lm_head")
-    if out is None:
-        out = torch.empty((hidden.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=hidden.device)
+    target = _prepare_sparse_out(hidden, weight, out)
     torch.ops.sglang_sm89.sparse_vocab_proj_bf16(
-        hidden.contiguous(),
-        weight.contiguous(),
-        vocab_mask.contiguous(),
-        out,
+        hidden.contiguous(), weight.contiguous(), vocab_mask.contiguous(), target
     )
-    return out
+    return target
 
 
 def sparse_vocab_fp8_lm_head(
-    hidden: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    vocab_mask: torch.Tensor,
+    hidden: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor, vocab_mask: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute row-scaled E4M3 FP8 hidden @ weight.T for active bitmask rows only (inactive -> -inf)."""
-    if not ensure_extension_loaded():
-        raise RuntimeError("sglang_sm89._C extension is required for sparse_vocab_fp8_lm_head")
-    if out is None:
-        out = torch.empty((hidden.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=hidden.device)
+    target = _prepare_sparse_out(hidden, weight, out)
     torch.ops.sglang_sm89.sparse_vocab_proj_fp8(
-        hidden.contiguous(),
-        weight.contiguous(),
-        weight_scale.contiguous(),
-        vocab_mask.contiguous(),
-        out,
+        hidden.contiguous(), weight.contiguous(), weight_scale.contiguous(), vocab_mask.contiguous(), target
     )
-    return out
+    return target
 
 
 def _quantize_fp8_lm_head(
@@ -193,30 +182,29 @@ def _quantize_fp8_lm_head(
     return w_fp8.contiguous(), scales.contiguous(), w_fp8.T, scales.view(n, 1).contiguous()
 
 
-def _ensure_verify_scratch(
-    lp_self: Any, *, cap_rows: int, n_vocab: int, hidden_dim: int, device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    logits_buf = getattr(lp_self, "_sm89_verify_logits_buf", None)
-    if (
-        logits_buf is None
-        or logits_buf.shape[0] < cap_rows
-        or logits_buf.shape[1] != n_vocab
-        or logits_buf.device != device
-    ):
-        logits_buf = torch.empty((max(cap_rows, 64), n_vocab), dtype=torch.bfloat16, device=device)
-        lp_self._sm89_verify_logits_buf = logits_buf
+def _is_cuda_capturing(device: torch.device) -> bool:
+    return device.type == "cuda" and torch.cuda.is_current_stream_capturing()
 
-    hidden_buf = getattr(lp_self, "_sm89_verify_hidden_buf", None)
-    if (
-        hidden_buf is None
-        or hidden_buf.shape[0] < cap_rows
-        or hidden_buf.shape[1] != hidden_dim
-        or hidden_buf.device != device
-    ):
-        hidden_buf = torch.empty((max(cap_rows, 64), hidden_dim), dtype=torch.bfloat16, device=device)
-        lp_self._sm89_verify_hidden_buf = hidden_buf
 
-    return logits_buf, hidden_buf
+def _borrow_arena_slice(
+    lp_self: Any,
+    attr: str,
+    rows: int,
+    cols: int,
+    device: torch.device,
+) -> torch.Tensor:
+    arena = getattr(lp_self, attr, None)
+    if (
+        arena is None
+        or arena.shape[0] < rows
+        or arena.shape[1] != cols
+        or arena.device != device
+    ):
+        if _is_cuda_capturing(device):
+            raise RuntimeError(f"Missing pre-allocated scratch arena {attr} during CUDA graph capture")
+        arena = torch.empty((max(rows, 64), cols), dtype=torch.bfloat16, device=device)
+        setattr(lp_self, attr, arena)
+    return arena[:rows]
 
 
 def _get_fp8_verify_bundle(lp_self: Any, weight: torch.Tensor):
@@ -228,135 +216,99 @@ def _get_fp8_verify_bundle(lp_self: Any, weight: torch.Tensor):
     return bundle
 
 
-def around_target_logits_processor_forward(
+def around_target_get_logits(
     original_fn,
     lp_self,
-    input_ids: torch.Tensor,
     hidden_states: torch.Tensor,
     lm_head,
     logits_metadata,
-    aux_hidden_states=None,
-    hidden_states_before_norm=None,
-):
-    """Defer TARGET_VERIFY lm_head projection until grammar bitmask sparsity is known."""
-    from sglang.srt.layers import layernorm_sp
-    from sglang.srt.layers.logits_processor import LogitsMetadata, LogitsProcessorOutput
-    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-
-    meta = (
-        LogitsMetadata.from_forward_batch(logits_metadata)
-        if isinstance(logits_metadata, ForwardBatch)
-        else logits_metadata
-    )
-
-    if (
-        not meta.forward_mode.is_target_verify()
-        or meta.extend_return_logprob
-        or getattr(lp_self, "use_fp32_lm_head", False)
-        or getattr(lp_self, "use_fp32_lm_head_output", False)
-        or getattr(lp_self, "final_logit_softcapping", None) is not None
-        or getattr(lm_head, "weight", None) is None
-        or lm_head.weight.dtype != torch.bfloat16
-        or getattr(lp_self, "do_tensor_parallel_all_gather", False)
-        or getattr(lp_self, "logit_scale", None) is not None
-    ):
+    embedding_bias: Optional[torch.Tensor] = None,
+    use_logits_buffer: bool = True,
+) -> torch.Tensor:
+    """Defer TARGET_VERIFY projection inside LogitsProcessor._get_logits until mask builds."""
+    fmode = getattr(logits_metadata, "forward_mode", None)
+    if fmode is None or not fmode.is_target_verify():
         return original_fn(
             lp_self,
-            input_ids,
             hidden_states,
             lm_head,
             logits_metadata,
-            aux_hidden_states=aux_hidden_states,
-            hidden_states_before_norm=hidden_states_before_norm,
+            embedding_bias=embedding_bias,
+            use_logits_buffer=use_logits_buffer,
         )
 
-    hidden_states, hidden_states_before_norm = layernorm_sp.maybe_exit_gather(
-        hidden_states=hidden_states,
-        hidden_states_before_norm=hidden_states_before_norm,
-        input_ids=input_ids,
-        forward_mode=meta.forward_mode,
+    weight = getattr(lm_head, "weight", None)
+    can_defer = (
+        not getattr(logits_metadata, "extend_return_logprob", False)
+        and embedding_bias is None
+        and not getattr(lp_self, "use_fp32_lm_head", False)
+        and not getattr(lp_self, "use_fp32_lm_head_output", False)
+        and getattr(lp_self, "final_logit_softcapping", None) is None
+        and getattr(lp_self, "logit_scale", None) is None
+        and not getattr(lp_self, "do_tensor_parallel_all_gather", False)
+        and int(getattr(lp_self, "tp_size", 1)) == 1
+        and weight is not None
+        and weight.dtype == torch.bfloat16
     )
-    if getattr(lp_self, "expected_aux_hidden_states", None) is not None:
-        lp_self._check_aux_hidden_states(aux_hidden_states, hidden_states, meta)
-
-    (
-        pruned_states,
-        pruned_states_before_norm,
-        aux_pruned_states,
-        sample_indices,
-        _input_logprob_indices,
-        _token_to_seq_idx,
-    ) = lp_self._get_pruned_states(
-        hidden_states,
-        hidden_states_before_norm,
-        aux_hidden_states,
-        meta,
-    )
-
-    hidden_states_to_store = lp_self._get_hidden_states_to_store(
-        hidden_states,
-        hidden_states_before_norm,
-        aux_hidden_states,
-        pruned_states,
-        pruned_states_before_norm,
-        aux_pruned_states,
-        sample_indices,
-        meta,
-    )
-    last_hidden_states_to_store = lp_self._get_last_hidden_states_to_store(
-        hidden_states, aux_hidden_states, meta
-    )
-
-    m = int(pruned_states.shape[0])
-    n_vocab = int(lm_head.weight.shape[0])
-    hidden_dim = int(pruned_states.shape[1])
-    logits_buf = getattr(lp_self, "_sm89_verify_logits_buf", None)
-    hidden_buf = getattr(lp_self, "_sm89_verify_hidden_buf", None)
-    if (
-        logits_buf is None
-        or logits_buf.shape[0] < m
-        or logits_buf.shape[1] != n_vocab
-        or hidden_buf is None
-        or hidden_buf.shape[0] < m
-        or hidden_buf.shape[1] != hidden_dim
-    ):
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("verify logits/hidden scratch buffers too small during CUDA graph capture")
-        logits_buf, hidden_buf = _ensure_verify_scratch(
+    if not can_defer:
+        lp_self._sm89_eager_verify_bypassed = True
+        return original_fn(
             lp_self,
-            cap_rows=m,
-            n_vocab=n_vocab,
-            hidden_dim=hidden_dim,
-            device=pruned_states.device,
+            hidden_states,
+            lm_head,
+            logits_metadata,
+            embedding_bias=embedding_bias,
+            use_logits_buffer=use_logits_buffer,
         )
+
+    rows, hidden_dim = int(hidden_states.shape[0]), int(hidden_states.shape[1])
+    n_vocab = int(weight.shape[0])
+    device = hidden_states.device
+
+    hidden_slot = _borrow_arena_slice(lp_self, "_sm89_verify_hidden_arena", rows, hidden_dim, device)
+    ext_buf = (
+        getattr(logits_metadata, "next_token_logits_buffer", None)
+        if use_logits_buffer
+        else None
+    )
+    if (
+        ext_buf is not None
+        and ext_buf.shape[0] >= rows
+        and ext_buf.shape[1] == n_vocab
+        and ext_buf.dtype == torch.bfloat16
+        and ext_buf.device == device
+    ):
+        logits_slot = ext_buf[:rows]
+    else:
+        logits_slot = _borrow_arena_slice(lp_self, "_sm89_verify_logits_arena", rows, n_vocab, device)
 
     if os.getenv("SGLANG_SM89_FP8_VERIFY_HEAD", "0").strip() == "1":
-        if not torch.cuda.is_current_stream_capturing():
-            _get_fp8_verify_bundle(lp_self, lm_head.weight)
+        if not _is_cuda_capturing(device):
+            _get_fp8_verify_bundle(lp_self, weight)
 
-    hidden_buf[:m].copy_(pruned_states)
-    lp_self._sm89_verify_deferred = True
-    return LogitsProcessorOutput(
-        next_token_logits=logits_buf[:m],
-        hidden_states=hidden_states_to_store,
-        last_hidden_states=last_hidden_states_to_store,
-        mm_input_embeds=meta.mm_input_embeds,
-    )
+    hidden_slot.copy_(hidden_states)
+    lp_self._sm89_verify_armed = True
+    lp_self._sm89_eager_verify_bypassed = False
+    return logits_slot
 
 
 def after_tp_worker_forward_batch_generation(result, tp_worker, *args, **kwargs):
-    """Capture deferred verify handles right after target forward (eager or CUDA graph)."""
-    if not kwargs.get("is_verify", False) or not _STEP_TLS.stack:
+    """Store deferred TARGET_VERIFY work ticket once target forward completes."""
+    if not (_STEP_TLS.stack and kwargs.get("is_verify", False)):
         return result
 
-    dflash_worker = _STEP_TLS.stack[-1][0]
-    lp = getattr(dflash_worker, "_target_logits_processor", None)
-    if lp is None or not getattr(lp, "_sm89_verify_deferred", False):
+    active_worker = _STEP_TLS.stack[-1][0]
+    lp = getattr(active_worker, "_target_logits_processor", None)
+    if lp is None or not getattr(lp, "_sm89_verify_armed", False):
+        return result
+    if getattr(lp, "_sm89_eager_verify_bypassed", False):
+        lp._sm89_eager_verify_bypassed = False
         return result
 
     logits_output = getattr(result, "logits_output", None)
-    hidden_buf = getattr(lp, "_sm89_verify_hidden_buf", None)
-    if logits_output is None or hidden_buf is None or logits_output.next_token_logits is None:
+    hidden_arena = getattr(lp, "_sm89_verify_hidden_arena", None)
+    out_tensor = getattr(logits_output, "next_token_logits", None)
+    if hidden_arena is None or out_tensor is None:
         return result
 
     lm_head = getattr(tp_worker.model_runner.model, "lm_head", None)
@@ -364,12 +316,12 @@ def after_tp_worker_forward_batch_generation(result, tp_worker, *args, **kwargs)
     if weight is None:
         return result
 
-    m = int(logits_output.next_token_logits.shape[0])
+    m_rows = int(out_tensor.shape[0])
     _VERIFY_TLS.pending = {
         "lp": lp,
-        "hidden": hidden_buf[:m],
+        "hidden": hidden_arena[:m_rows],
         "weight": weight,
-        "out": logits_output.next_token_logits,
+        "out": out_tensor,
         "vocab_mask_gpu": None,
         "use_sparse": False,
         "done": False,
@@ -378,62 +330,56 @@ def after_tp_worker_forward_batch_generation(result, tp_worker, *args, **kwargs)
 
 
 def around_build_grammar_vocab_mask(original_fn, *args, **kwargs):
-    """Run C++ 64-row roofline check on CPU bitmask before async H2D mask transfer."""
+    """Run C++ 64-row roofline check on CPU bitmask before non-blocking H2D mask upload."""
     from sglang.srt.speculative import spec_utils as su
 
-    pending = _VERIFY_TLS.pending
-    if pending is None:
+    ticket = _VERIFY_TLS.pending
+    if ticket is None:
         return original_fn(*args, **kwargs)
 
-    reqs = kwargs["reqs"]
-    tree = kwargs["tree"]
-    sampling_info = kwargs["sampling_info"]
-    device = kwargs["device"]
     barrier = kwargs.get("barrier")
-
     if barrier is not None:
         barrier()
+
+    sampling_info = kwargs["sampling_info"]
     vocab_mask_cpu, grammar = su.generate_token_bitmask(
-        reqs,
-        *tree.resolve(),
+        kwargs["reqs"],
+        *kwargs["tree"].resolve(),
         sampling_info.vocab_size,
     )
     if vocab_mask_cpu is None:
         return None
 
-    n_weight = int(pending["weight"].shape[0])
-    max_ratio = float(os.getenv("SGLANG_SM89_MAX_EFF_ROW_RATIO", "0.55"))
-    use_sparse = (
-        int(vocab_mask_cpu.shape[1]) * 32 >= n_weight
-        and select_sparse_vocab_proj(
-            vocab_mask_cpu,
-            n_weight,
-            k_chunk=8,
-            max_eff_row_ratio=max_ratio,
-        )
+    n_weight = int(ticket["weight"].shape[0])
+    ratio_limit = float(os.getenv("SGLANG_SM89_MAX_EFF_ROW_RATIO", "0.55"))
+    use_sparse = int(vocab_mask_cpu.shape[1]) * 32 >= n_weight and select_sparse_vocab_proj(
+        vocab_mask_cpu,
+        n_weight,
+        k_chunk=8,
+        max_eff_row_ratio=ratio_limit,
     )
 
-    vocab_mask_gpu = vocab_mask_cpu.to(device, non_blocking=True)
+    vocab_mask_gpu = vocab_mask_cpu.to(kwargs["device"], non_blocking=True)
     sampling_info.grammar_mask = None
-    pending["vocab_mask_gpu"] = vocab_mask_gpu
-    pending["use_sparse"] = use_sparse
+    ticket["vocab_mask_gpu"] = vocab_mask_gpu
+    ticket["use_sparse"] = use_sparse
     return su.GrammarMask(grammar, vocab_mask_gpu)
 
 
 def materialize_deferred_target_logits() -> None:
-    """Populate deferred next_token_logits using sparse kTileV=64 projection or dense GEMM."""
-    pending = _VERIFY_TLS.pending
-    if pending is None or pending["done"]:
+    """Execute deferred sparse kTileV=64 projection or dense fallback into next_token_logits."""
+    ticket = _VERIFY_TLS.pending
+    if ticket is None or ticket["done"]:
         return
-    pending["done"] = True
+    ticket["done"] = True
     _VERIFY_TLS.pending = None
 
-    lp = pending["lp"]
-    hidden = pending["hidden"]
-    weight = pending["weight"]
-    out = pending["out"]
-    vocab_mask_gpu = pending["vocab_mask_gpu"]
-    use_sparse = bool(pending["use_sparse"])
+    lp = ticket["lp"]
+    hidden = ticket["hidden"]
+    weight = ticket["weight"]
+    out = ticket["out"]
+    vocab_mask_gpu = ticket["vocab_mask_gpu"]
+    use_sparse = bool(ticket["use_sparse"])
     use_fp8 = os.getenv("SGLANG_SM89_FP8_VERIFY_HEAD", "0").strip() == "1"
 
     if use_fp8:
@@ -444,8 +390,8 @@ def materialize_deferred_target_logits() -> None:
         from sglang.kernels.ops.gemm import fp8_scaled_mm
         from sglang.kernels.ops.quantization.fp8_kernel import sglang_per_token_quant_fp8
 
-        h2d = hidden if hidden.is_contiguous() else hidden.contiguous()
-        xq, xs = sglang_per_token_quant_fp8(h2d)
+        h_cont = hidden if hidden.is_contiguous() else hidden.contiguous()
+        xq, xs = sglang_per_token_quant_fp8(h_cont)
         logits = fp8_scaled_mm(xq, w_fp8_t, xs, w_scale_col, out.dtype, None)
         out.copy_(logits)
         return
@@ -456,16 +402,16 @@ def materialize_deferred_target_logits() -> None:
         torch.mm(hidden, weight.T, out=out)
 
 
-def before_apply_dflash_verify_logits_adjustments(*args, **kwargs) -> None:
-    materialize_deferred_target_logits()
-
-
-def before_dflash_accept_block(*args, **kwargs) -> None:
-    materialize_deferred_target_logits()
-
-
 def clear_target_verify_tls() -> None:
     _VERIFY_TLS.pending = None
+
+
+def before_apply_dflash_verify_logits_adjustments(*_args, **_kwargs) -> None:
+    materialize_deferred_target_logits()
+
+
+def before_dflash_accept_block(*_args, **_kwargs) -> None:
+    materialize_deferred_target_logits()
 
 
 def register_hooks(HookRegistry=None, HookType=None) -> None:
@@ -476,28 +422,32 @@ def register_hooks(HookRegistry=None, HookType=None) -> None:
         HookRegistry = _HR
         HookType = _HT
 
-    HookRegistry.register(
-        "sglang.srt.layers.logits_processor.LogitsProcessor.forward",
-        around_target_logits_processor_forward,
-        HookType.AROUND,
+    hook_specs = (
+        (
+            "sglang.srt.layers.logits_processor.LogitsProcessor._get_logits",
+            around_target_get_logits,
+            HookType.AROUND,
+        ),
+        (
+            "sglang.srt.managers.tp_worker.TpModelWorker.forward_batch_generation",
+            after_tp_worker_forward_batch_generation,
+            HookType.AFTER,
+        ),
+        (
+            "sglang.srt.speculative.spec_utils.build_grammar_vocab_mask",
+            around_build_grammar_vocab_mask,
+            HookType.AROUND,
+        ),
+        (
+            "sglang.srt.speculative.dflash_worker_v2.apply_dflash_verify_logits_adjustments",
+            before_apply_dflash_verify_logits_adjustments,
+            HookType.BEFORE,
+        ),
+        (
+            "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2._accept_block",
+            before_dflash_accept_block,
+            HookType.BEFORE,
+        ),
     )
-    HookRegistry.register(
-        "sglang.srt.managers.tp_worker.TpModelWorker.forward_batch_generation",
-        after_tp_worker_forward_batch_generation,
-        HookType.AFTER,
-    )
-    HookRegistry.register(
-        "sglang.srt.speculative.spec_utils.build_grammar_vocab_mask",
-        around_build_grammar_vocab_mask,
-        HookType.AROUND,
-    )
-    HookRegistry.register(
-        "sglang.srt.speculative.dflash_worker_v2.apply_dflash_verify_logits_adjustments",
-        before_apply_dflash_verify_logits_adjustments,
-        HookType.BEFORE,
-    )
-    HookRegistry.register(
-        "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2._accept_block",
-        before_dflash_accept_block,
-        HookType.BEFORE,
-    )
+    for target_path, fn, htype in hook_specs:
+        HookRegistry.register(target_path, fn, htype)

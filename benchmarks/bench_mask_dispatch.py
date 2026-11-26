@@ -125,33 +125,42 @@ def build_synthetic_workloads(rng: np.random.Generator, vocab_size: int):
     yield "mixed_56struct_8str_85pct_r64", torch.from_numpy(mixed_85.view(np.int32))
 
 
+def _compile_ascii_spec(vocab_size: int):
+    import xgrammar as xgr
+
+    ascii_syms = [chr(c) for c in range(32, 127)]
+    sym_to_id = {ch: idx for idx, ch in enumerate(ascii_syms)}
+    info = xgr.TokenizerInfo(
+        ascii_syms + ["<eos>"],
+        stop_token_ids=[len(ascii_syms)],
+        vocab_size=vocab_size,
+    )
+    return info, lambda text: [sym_to_id[ch] for ch in text]
+
+
+def _compile_hf_spec(tokenizer_path: str, vocab_size: int):
+    import xgrammar as xgr
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+    info = xgr.TokenizerInfo.from_huggingface(tok, vocab_size=vocab_size)
+    return info, lambda text: tok.encode(text, add_special_tokens=False)
+
+
 def build_xgrammar_workloads(tokenizer_path: str, vocab_size: int):
     import xgrammar as xgr
 
     if tokenizer_path == "ascii":
-        vocabulary = [chr(index) for index in range(32, 127)]
-        token_ids = {token: index for index, token in enumerate(vocabulary)}
-        tokenizer_info = xgr.TokenizerInfo(
-            [*vocabulary, "<eos>"], vocab_size=vocab_size, stop_token_ids=[len(vocabulary)]
-        )
-
-        def encode(text: str) -> list[int]:
-            return [token_ids[ch] for ch in text]
+        info, encoder = _compile_ascii_spec(vocab_size)
     else:
-        from transformers import AutoTokenizer
+        info, encoder = _compile_hf_spec(tokenizer_path, vocab_size)
 
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab_size)
-
-        def encode(text: str) -> list[int]:
-            return tokenizer.encode(text, add_special_tokens=False)
-
-    compiler = xgr.GrammarCompiler(tokenizer_info)
-    fixtures = (
+    compiler = xgr.GrammarCompiler(info)
+    specs = (
         (
             "tool_call",
-            {"tool": {"enum": ["lookup_account", "lookup_invoice"]}, "args": {"type": "string"}},
-            {"tool": "lookup_account", "args": "ACCT-0042"},
+            {"args": {"type": "string"}, "tool": {"enum": ["lookup_account", "lookup_invoice"]}},
+            {"args": "ACCT-0042", "tool": "lookup_account"},
         ),
         (
             "tool_followup",
@@ -159,28 +168,28 @@ def build_xgrammar_workloads(tokenizer_path: str, vocab_size: int):
             {"status": "ok", "summary": "Completed lookup across two shards."},
         ),
     )
-    for name, properties, value in fixtures:
-        schema = {
-            "type": "object",
-            "properties": properties,
-            "required": list(properties),
+    for case_name, props, sample_obj in specs:
+        json_schema = {
             "additionalProperties": False,
+            "properties": props,
+            "required": list(props),
+            "type": "object",
         }
-        compiled = compiler.compile_json_schema(json.dumps(schema))
-        matcher = xgr.GrammarMatcher(compiled)
-        tokens = encode(json.dumps(value, separators=(",", ":")))
-        if len(tokens) < 8:
-            raise RuntimeError(f"{name} produced fewer than 8 trace tokens")
-        trace = xgr.allocate_token_bitmask(len(tokens), vocab_size)
-        for index, tok in enumerate(tokens):
-            matcher.fill_next_token_bitmask(trace, index)
-            if not matcher.accept_token(tok):
-                raise RuntimeError(f"{name} rejected token at index {index}")
+        grammar = compiler.compile_json_schema(json.dumps(json_schema))
+        matcher = xgr.GrammarMatcher(grammar)
+        tok_seq = encoder(json.dumps(sample_obj, separators=(",", ":")))
+        if len(tok_seq) < 8:
+            raise RuntimeError(f"Expected >= 8 tokens for {case_name}, got {len(tok_seq)}")
+        bitmask_trace = xgr.allocate_token_bitmask(len(tok_seq), vocab_size)
+        for pos, tid in enumerate(tok_seq):
+            matcher.fill_next_token_bitmask(bitmask_trace, pos)
+            if not matcher.accept_token(tid):
+                raise RuntimeError(f"Grammar rejected trace token {tid} at step {pos} ({case_name})")
 
-        starts = np.linspace(0, len(tokens) - 8, 8, dtype=np.int64)
-        windows = [trace[s : s + 8] for s in starts]
-        yield f"{name}_r8", windows[len(windows) // 2]
-        yield f"{name}_r64", torch.cat(windows, dim=0)
+        offsets = np.linspace(0, len(tok_seq) - 8, 8, dtype=np.int64)
+        slices = [bitmask_trace[idx : idx + 8] for idx in offsets]
+        yield f"{case_name}_r8", slices[len(slices) // 2]
+        yield f"{case_name}_r64", torch.cat(slices, dim=0)
 
 
 def _time_mean_us(fn, mask: torch.Tensor, inner: int) -> float:
@@ -295,30 +304,30 @@ def main() -> None:
         for name, mask in workloads
     ]
 
-    report = {
-        "scope": scope,
-        "cpp_extension_loaded": has_cpp,
-        "platform": platform.platform(),
-        "numpy": np.__version__,
-        "torch": torch.__version__,
-        "config": {
-            "vocab_size": args.vocab_size,
-            "k_chunk": args.k_chunk,
-            "max_eff_row_ratio": args.max_eff_row_ratio,
-            "repeats": args.repeats,
-            "inner": args.inner,
-            "seed": args.seed,
-            "xgrammar_tokenizer": (
-                Path(args.xgrammar_tokenizer).name if args.xgrammar_tokenizer else None
-            ),
-        },
+    cfg_meta = {
+        "inner": args.inner,
+        "k_chunk": args.k_chunk,
+        "max_eff_row_ratio": args.max_eff_row_ratio,
+        "repeats": args.repeats,
+        "seed": args.seed,
+        "vocab_size": args.vocab_size,
+    }
+    if args.xgrammar_tokenizer:
+        cfg_meta["xgrammar_tokenizer"] = Path(args.xgrammar_tokenizer).name
+    report: dict[str, object] = {
         "cases": cases,
+        "config": cfg_meta,
+        "cpp_extension_loaded": has_cpp,
+        "numpy": np.__version__,
+        "platform": platform.platform(),
+        "scope": scope,
+        "torch": torch.__version__,
     }
     if args.xgrammar_tokenizer:
         report["xgrammar"] = version("xgrammar")
-        tok_json = Path(args.xgrammar_tokenizer) / "tokenizer.json"
-        if tok_json.is_file():
-            report["tokenizer_sha256"] = hashlib.sha256(tok_json.read_bytes()).hexdigest()
+        tok_manifest = Path(args.xgrammar_tokenizer) / "tokenizer.json"
+        if tok_manifest.is_file():
+            report["tokenizer_sha256"] = hashlib.sha256(tok_manifest.read_bytes()).hexdigest()
 
     encoded = json.dumps(report, indent=2)
     if args.out:

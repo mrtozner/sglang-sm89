@@ -86,3 +86,73 @@ def test_boundary_full_vocab_248320() -> None:
 
     with pytest.raises(ValueError):
         select_sparse_vocab_proj(torch.zeros((1, 4), dtype=torch.int32), 256, force_numpy=True)
+
+
+def test_get_logits_deferral_state_machine_graph_prefill_replay() -> None:
+    """Verify _get_logits arms on TARGET_VERIFY and survives interleaved eager prefill."""
+    from types import SimpleNamespace
+    from sglang_sm89.coupled_grammar import _STEP_TLS
+    from sglang_sm89.vocab_projection import (
+        after_tp_worker_forward_batch_generation,
+        around_target_get_logits,
+        before_apply_dflash_verify_logits_adjustments,
+        clear_target_verify_tls,
+    )
+
+    class _Mode:
+        def __init__(self, verify: bool) -> None:
+            self._v = verify
+
+        def is_target_verify(self) -> bool:
+            return self._v
+
+    torch.manual_seed(17)
+    weight = torch.randn((16, 8), dtype=torch.bfloat16)
+    lm_head = SimpleNamespace(weight=weight)
+    lp = SimpleNamespace(
+        use_fp32_lm_head=False,
+        use_fp32_lm_head_output=False,
+        final_logit_softcapping=None,
+        logit_scale=None,
+        do_tensor_parallel_all_gather=False,
+        tp_size=1,
+    )
+    ext_buf = torch.zeros((8, 16), dtype=torch.bfloat16)
+
+    def _orig_get_logits(_self, h, lm_h, _meta, embedding_bias=None, use_logits_buffer=True):
+        return h @ lm_h.weight.T
+
+    # Step 1: Verify capture arms deferral
+    h_verify = torch.randn((4, 8), dtype=torch.bfloat16)
+    meta_verify = SimpleNamespace(
+        forward_mode=_Mode(True),
+        extend_return_logprob=False,
+        next_token_logits_buffer=ext_buf,
+    )
+    out_v = around_target_get_logits(_orig_get_logits, lp, h_verify, lm_head, meta_verify)
+    assert out_v.data_ptr() == ext_buf[:4].data_ptr()
+    assert getattr(lp, "_sm89_verify_armed", False) is True
+
+    # Step 2: Interleaved eager prefill (not verify) runs original_fn and must NOT disarm verify
+    h_prefill = torch.randn((2, 8), dtype=torch.bfloat16)
+    meta_prefill = SimpleNamespace(
+        forward_mode=_Mode(False),
+        extend_return_logprob=False,
+        next_token_logits_buffer=None,
+    )
+    out_p = around_target_get_logits(_orig_get_logits, lp, h_prefill, lm_head, meta_prefill)
+    assert torch.allclose(out_p, h_prefill @ weight.T)
+    assert getattr(lp, "_sm89_verify_armed", False) is True
+
+    # Step 3: Verify CUDA Graph replay executes without re-running _get_logits Python
+    dflash_w = SimpleNamespace(_target_logits_processor=lp)
+    tp_w = SimpleNamespace(model_runner=SimpleNamespace(model=SimpleNamespace(lm_head=lm_head)))
+    _STEP_TLS.stack.append((dflash_w, SimpleNamespace(), None))
+    try:
+        res = SimpleNamespace(logits_output=SimpleNamespace(next_token_logits=ext_buf[:4]))
+        after_tp_worker_forward_batch_generation(res, tp_w, is_verify=True)
+        before_apply_dflash_verify_logits_adjustments()
+        assert torch.allclose(ext_buf[:4], h_verify @ weight.T)
+    finally:
+        _STEP_TLS.stack.pop()
+        clear_target_verify_tls()

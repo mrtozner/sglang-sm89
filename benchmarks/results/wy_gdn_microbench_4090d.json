@@ -1,0 +1,461 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090 D",
+  "rows": [
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 1,
+      "spec_len": 6,
+      "tokens": 6,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 6.1e-05,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 20.48,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 55.296,
+        "min_us": 12.288
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 1,
+      "spec_len": 8,
+      "tokens": 8,
+      "cos_sim_vs_triton": 0.999996,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 19.456,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 55.296,
+        "min_us": 13.312
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 1,
+      "spec_len": 16,
+      "tokens": 16,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 6.1e-05,
+      "wy_sm89_us": {
+        "median_us": 21.504,
+        "p95_us": 31.744,
+        "min_us": 21.504
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 29.696,
+        "min_us": 24.576
+      },
+      "speedup": 1.286
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 2,
+      "spec_len": 6,
+      "tokens": 12,
+      "cos_sim_vs_triton": 0.999996,
+      "max_abs_err": 6.1e-05,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 19.456,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 55.296,
+        "min_us": 13.312
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 2,
+      "spec_len": 8,
+      "tokens": 16,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 18.432,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 55.296,
+        "min_us": 13.312
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 2,
+      "spec_len": 16,
+      "tokens": 32,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 23.04,
+        "p95_us": 33.792,
+        "min_us": 22.528
+      },
+      "triton_us": {
+        "median_us": 26.624,
+        "p95_us": 40.96,
+        "min_us": 26.624
+      },
+      "speedup": 1.156
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 4,
+      "spec_len": 6,
+      "tokens": 24,
+      "cos_sim_vs_triton": 0.999996,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 19.456,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 27.648,
+        "min_us": 16.384
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 4,
+      "spec_len": 8,
+      "tokens": 32,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 16.384,
+        "p95_us": 28.672,
+        "min_us": 15.36
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 31.744,
+        "min_us": 15.36
+      },
+      "speedup": 1.688
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 4,
+      "spec_len": 16,
+      "tokens": 64,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 45.056,
+        "p95_us": 46.08,
+        "min_us": 38.912
+      },
+      "triton_us": {
+        "median_us": 31.744,
+        "p95_us": 45.056,
+        "min_us": 30.72
+      },
+      "speedup": 0.705
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 8,
+      "spec_len": 6,
+      "tokens": 48,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 30.72,
+        "p95_us": 36.864,
+        "min_us": 24.576
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 41.984,
+        "min_us": 25.6
+      },
+      "speedup": 0.9
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 8,
+      "spec_len": 8,
+      "tokens": 64,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 32.768,
+        "p95_us": 40.96,
+        "min_us": 26.624
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 41.984,
+        "min_us": 26.624
+      },
+      "speedup": 0.844
+    },
+    {
+      "ckpt_dtype": "bfloat16",
+      "B": 8,
+      "spec_len": 16,
+      "tokens": 128,
+      "cos_sim_vs_triton": 0.999995,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 64.512,
+        "p95_us": 66.56,
+        "min_us": 58.368
+      },
+      "triton_us": {
+        "median_us": 63.488,
+        "p95_us": 72.704,
+        "min_us": 57.344
+      },
+      "speedup": 0.984
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 1,
+      "spec_len": 6,
+      "tokens": 6,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 6.1e-05,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 20.48,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 41.984,
+        "min_us": 19.456
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 1,
+      "spec_len": 8,
+      "tokens": 8,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 18.432,
+        "min_us": 14.336
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 35.84,
+        "min_us": 18.432
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 1,
+      "spec_len": 16,
+      "tokens": 16,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 24.576,
+        "p95_us": 32.768,
+        "min_us": 22.528
+      },
+      "triton_us": {
+        "median_us": 44.544,
+        "p95_us": 55.296,
+        "min_us": 38.912
+      },
+      "speedup": 1.812
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 2,
+      "spec_len": 6,
+      "tokens": 12,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 15.36,
+        "p95_us": 21.504,
+        "min_us": 15.36
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 27.648,
+        "min_us": 21.504
+      },
+      "speedup": 1.8
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 2,
+      "spec_len": 8,
+      "tokens": 16,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 16.384,
+        "p95_us": 26.624,
+        "min_us": 15.36
+      },
+      "triton_us": {
+        "median_us": 27.648,
+        "p95_us": 28.672,
+        "min_us": 21.504
+      },
+      "speedup": 1.688
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 2,
+      "spec_len": 16,
+      "tokens": 32,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 25.6,
+        "p95_us": 30.72,
+        "min_us": 23.552
+      },
+      "triton_us": {
+        "median_us": 48.128,
+        "p95_us": 57.344,
+        "min_us": 47.104
+      },
+      "speedup": 1.88
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 4,
+      "spec_len": 6,
+      "tokens": 24,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 17.408,
+        "p95_us": 27.648,
+        "min_us": 16.384
+      },
+      "triton_us": {
+        "median_us": 45.056,
+        "p95_us": 55.296,
+        "min_us": 38.912
+      },
+      "speedup": 2.588
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 4,
+      "spec_len": 8,
+      "tokens": 32,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 18.432,
+        "p95_us": 27.648,
+        "min_us": 17.408
+      },
+      "triton_us": {
+        "median_us": 45.056,
+        "p95_us": 55.296,
+        "min_us": 37.888
+      },
+      "speedup": 2.444
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 4,
+      "spec_len": 16,
+      "tokens": 64,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 49.152,
+        "p95_us": 50.176,
+        "min_us": 43.008
+      },
+      "triton_us": {
+        "median_us": 89.088,
+        "p95_us": 91.136,
+        "min_us": 81.92
+      },
+      "speedup": 1.812
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 8,
+      "spec_len": 6,
+      "tokens": 48,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 33.792,
+        "p95_us": 35.84,
+        "min_us": 28.672
+      },
+      "triton_us": {
+        "median_us": 75.776,
+        "p95_us": 84.992,
+        "min_us": 74.752
+      },
+      "speedup": 2.242
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 8,
+      "spec_len": 8,
+      "tokens": 64,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 35.328,
+        "p95_us": 36.864,
+        "min_us": 29.696
+      },
+      "triton_us": {
+        "median_us": 75.776,
+        "p95_us": 84.992,
+        "min_us": 74.752
+      },
+      "speedup": 2.145
+    },
+    {
+      "ckpt_dtype": "float32",
+      "B": 8,
+      "spec_len": 16,
+      "tokens": 128,
+      "cos_sim_vs_triton": 0.999998,
+      "max_abs_err": 0.000122,
+      "wy_sm89_us": {
+        "median_us": 70.656,
+        "p95_us": 71.68,
+        "min_us": 64.512
+      },
+      "triton_us": {
+        "median_us": 169.984,
+        "p95_us": 172.032,
+        "min_us": 165.888
+      },
+      "speedup": 2.406
+    }
+  ]
+}

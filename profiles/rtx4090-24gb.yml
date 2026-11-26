@@ -24,47 +24,35 @@ services:
       SGLANG_SM89_FP8_VERIFY_HEAD: ${SGLANG_SM89_FP8_VERIFY_HEAD:-0}
       SGLANG_SM89_SAM_GRAFT: ${SGLANG_SM89_SAM_GRAFT:-0}
     command:
-      - python
+      - python3
       - -m
       - sglang.launch_server
-      - --model-path
-      - ${MODEL_PATH:-Qwen/Qwen3.8-9B-FP8}
-      - --host
-      - 0.0.0.0
-      - --port
-      - '30000'
-      - --quantization
-      - fp8
-      - --kv-cache-dtype
-      - fp8_e4m3
-      - --mem-fraction-static
-      - '0.88'
-      - --context-length
-      - '8192'
-      - --max-running-requests
-      - '8'
-      - --cuda-graph-max-bs-decode
-      - '8'
+      - --host=0.0.0.0
+      - --port=30000
+      - --model-path=${MODEL_PATH:-Qwen/Qwen3.8-9B-FP8}
+      - --quantization=fp8
+      - --kv-cache-dtype=fp8_e4m3
+      - --context-length=8192
+      - --mem-fraction-static=0.88
+      - --max-running-requests=8
+      - --cuda-graph-max-bs-decode=8
+      - --schedule-policy=lpm
+      - --attention-backend=flashinfer
       - --disable-prefill-cuda-graph
-      - --schedule-policy
-      - lpm
-      - --attention-backend
-      - flashinfer
-      - --grammar-backend
-      - xgrammar
+      - --grammar-backend=xgrammar
       - --enable-dynamic-batch-tokenizer
       - --enable-metrics
     volumes:
-      - sglang-hf-cache:/root/.cache/huggingface
-      - sglang-triton-cache:/root/.triton
       - ${SGLANG_SM89_CONFIG_CACHE:-~/.cache/sglang-sm89/fp8_configs}:/root/.cache/sglang-sm89/fp8_configs
+      - sglang-triton-cache:/root/.triton
+      - sglang-hf-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
+            - capabilities: [gpu]
               device_ids: ['0']
-              capabilities: [gpu]
+              driver: nvidia
 
 volumes:
   sglang-hf-cache:

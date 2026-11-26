@@ -22,7 +22,7 @@
             "min_us": 11.264
           },
           "fp8_timing": {
-            "median_us": 9.216,
+            "median_us": 8.192,
             "p95_us": 9.216,
             "min_us": 8.192
           },
@@ -35,14 +35,14 @@
           "fp8_exact": true,
           "bad_late_rows": 0,
           "bf16_timing": {
-            "median_us": 38.912,
-            "p95_us": 39.936,
-            "min_us": 33.792
+            "median_us": 37.888,
+            "p95_us": 38.912,
+            "min_us": 31.744
           },
           "fp8_timing": {
             "median_us": 26.624,
-            "p95_us": 27.648,
-            "min_us": 20.48
+            "p95_us": 28.672,
+            "min_us": 19.456
           },
           "correct": true
         },
@@ -53,14 +53,14 @@
           "fp8_exact": true,
           "bad_late_rows": 0,
           "bf16_timing": {
-            "median_us": 113.664,
-            "p95_us": 114.688,
-            "min_us": 107.52
+            "median_us": 107.52,
+            "p95_us": 108.544,
+            "min_us": 101.376
           },
           "fp8_timing": {
-            "median_us": 69.632,
-            "p95_us": 70.656,
-            "min_us": 64.512
+            "median_us": 66.56,
+            "p95_us": 67.584,
+            "min_us": 61.44
           },
           "correct": true
         },
@@ -71,14 +71,14 @@
           "fp8_exact": true,
           "bad_late_rows": 0,
           "bf16_timing": {
-            "median_us": 442.368,
-            "p95_us": 443.392,
-            "min_us": 441.344
+            "median_us": 422.912,
+            "p95_us": 423.936,
+            "min_us": 421.888
           },
           "fp8_timing": {
-            "median_us": 267.264,
-            "p95_us": 268.288,
-            "min_us": 266.24
+            "median_us": 256.0,
+            "p95_us": 257.024,
+            "min_us": 254.976
           },
           "correct": true
         },
@@ -89,14 +89,14 @@
           "fp8_exact": true,
           "bad_late_rows": 0,
           "bf16_timing": {
-            "median_us": 473.088,
-            "p95_us": 474.112,
-            "min_us": 472.064
+            "median_us": 450.56,
+            "p95_us": 451.584,
+            "min_us": 449.536
           },
           "fp8_timing": {
-            "median_us": 288.768,
-            "p95_us": 289.792,
-            "min_us": 287.744
+            "median_us": 276.48,
+            "p95_us": 276.48,
+            "min_us": 275.456
           },
           "correct": true
         },
@@ -107,14 +107,14 @@
           "fp8_exact": true,
           "bad_late_rows": 0,
           "bf16_timing": {
-            "median_us": 482.304,
-            "p95_us": 482.304,
-            "min_us": 481.28
+            "median_us": 456.704,
+            "p95_us": 457.728,
+            "min_us": 456.704
           },
           "fp8_timing": {
-            "median_us": 292.864,
-            "p95_us": 292.864,
-            "min_us": 291.84
+            "median_us": 280.576,
+            "p95_us": 281.6,
+            "min_us": 279.552
           },
           "correct": true
         }
@@ -123,9 +123,9 @@
       "mixed_64_max_diff": 0.00195,
       "dispatch_cpp_numpy_agree": true,
       "cpp_dispatch_timing": {
-        "median_us": 75.894,
-        "p95_us": 77.69,
-        "min_us": 74.801
+        "median_us": 76.258,
+        "p95_us": 80.5,
+        "min_us": 74.981
       },
       "cudagraph_ok": true,
       "cudagraph_max_diff": 0.00391,
@@ -134,25 +134,25 @@
           "case": "sparse_r1",
           "m": 1,
           "n": 248320,
-          "dense_bf16_us": 2606.08,
+          "dense_bf16_us": 2605.056,
           "sparse_bf16_us": 27.648,
-          "speedup": 94.26
+          "speedup": 94.22
         },
         {
           "case": "sparse_r8",
           "m": 8,
           "n": 248320,
-          "dense_bf16_us": 2684.928,
-          "sparse_bf16_us": 165.888,
-          "speedup": 16.19
+          "dense_bf16_us": 2692.096,
+          "sparse_bf16_us": 164.864,
+          "speedup": 16.33
         },
         {
           "case": "mixed_56struct_8str_r64",
           "m": 64,
           "n": 248320,
-          "dense_bf16_us": 3081.216,
-          "sparse_bf16_us": 420.864,
-          "speedup": 7.32
+          "dense_bf16_us": 3078.144,
+          "sparse_bf16_us": 419.84,
+          "speedup": 7.33
         }
       ]
     }

@@ -1,18 +1,4 @@
 {
-  "scope": "XGrammar tool-call packed bitmask dispatch",
-  "cpp_extension_loaded": true,
-  "platform": "Linux-6.17.0-23-generic-x86_64-with-glibc2.39",
-  "numpy": "2.3.5",
-  "torch": "2.14.1+cu130",
-  "config": {
-    "vocab_size": 248320,
-    "k_chunk": 8,
-    "max_eff_row_ratio": 0.55,
-    "repeats": 25,
-    "inner": 10,
-    "seed": 20261125,
-    "xgrammar_tokenizer": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
-  },
   "cases": [
     {
       "case": "tool_call_r8",
@@ -23,25 +9,25 @@
       "vocab_size": 248320,
       "route": "dense",
       "agree": true,
-      "active_pairs": 15531,
+      "active_pairs": 27143,
       "active_tiles": 3877,
       "union_active_tile_fraction": 0.999227,
       "timings": {
         "numpy_roofline": {
-          "p50_us": 352.647,
-          "p95_us": 359.414
+          "p50_us": 351.915,
+          "p95_us": 356.372
         },
         "naive_scan": {
-          "p50_us": 13370.029,
-          "p95_us": 13384.575
+          "p50_us": 15678.266,
+          "p95_us": 15721.076
         },
         "cpp_roofline": {
-          "p50_us": 10.506,
-          "p95_us": 10.766
+          "p50_us": 10.952,
+          "p95_us": 11.256
         }
       },
-      "cpp_vs_numpy_speedup": 33.57,
-      "cpp_vs_naive_speedup": 1272.61
+      "cpp_vs_numpy_speedup": 32.13,
+      "cpp_vs_naive_speedup": 1431.54
     },
     {
       "case": "tool_call_r64",
@@ -52,25 +38,25 @@
       "vocab_size": 248320,
       "route": "dense",
       "agree": true,
-      "active_pairs": 112612,
+      "active_pairs": 182299,
       "active_tiles": 3877,
       "union_active_tile_fraction": 0.999227,
       "timings": {
         "numpy_roofline": {
-          "p50_us": 277.13,
-          "p95_us": 280.001
+          "p50_us": 252.205,
+          "p95_us": 270.12
         },
         "naive_scan": {
-          "p50_us": 63734.055,
-          "p95_us": 63758.7
+          "p50_us": 76582.879,
+          "p95_us": 77389.798
         },
         "cpp_roofline": {
-          "p50_us": 11.919,
-          "p95_us": 12.358
+          "p50_us": 8.641,
+          "p95_us": 10.999
         }
       },
-      "cpp_vs_numpy_speedup": 23.25,
-      "cpp_vs_naive_speedup": 5347.27
+      "cpp_vs_numpy_speedup": 29.19,
+      "cpp_vs_naive_speedup": 8862.73
     },
     {
       "case": "tool_followup_r8",
@@ -86,20 +72,20 @@
       "union_active_tile_fraction": 0.999227,
       "timings": {
         "numpy_roofline": {
-          "p50_us": 352.276,
-          "p95_us": 355.624
+          "p50_us": 352.786,
+          "p95_us": 370.066
         },
         "naive_scan": {
-          "p50_us": 13336.742,
-          "p95_us": 13387.226
+          "p50_us": 13423.755,
+          "p95_us": 14100.237
         },
         "cpp_roofline": {
-          "p50_us": 10.509,
-          "p95_us": 10.755
+          "p50_us": 10.628,
+          "p95_us": 12.831
         }
       },
-      "cpp_vs_numpy_speedup": 33.52,
-      "cpp_vs_naive_speedup": 1269.08
+      "cpp_vs_numpy_speedup": 33.19,
+      "cpp_vs_naive_speedup": 1263.06
     },
     {
       "case": "tool_followup_r64",
@@ -115,22 +101,36 @@
       "union_active_tile_fraction": 0.999227,
       "timings": {
         "numpy_roofline": {
-          "p50_us": 274.459,
-          "p95_us": 296.344
+          "p50_us": 280.233,
+          "p95_us": 283.353
         },
         "naive_scan": {
-          "p50_us": 63338.685,
-          "p95_us": 64741.884
+          "p50_us": 63121.561,
+          "p95_us": 63200.586
         },
         "cpp_roofline": {
-          "p50_us": 12.139,
-          "p95_us": 14.388
+          "p50_us": 11.985,
+          "p95_us": 12.388
         }
       },
-      "cpp_vs_numpy_speedup": 22.61,
-      "cpp_vs_naive_speedup": 5217.78
+      "cpp_vs_numpy_speedup": 23.38,
+      "cpp_vs_naive_speedup": 5266.71
     }
   ],
+  "config": {
+    "inner": 10,
+    "k_chunk": 8,
+    "max_eff_row_ratio": 0.55,
+    "repeats": 25,
+    "seed": 20261125,
+    "vocab_size": 248320,
+    "xgrammar_tokenizer": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+  },
+  "cpp_extension_loaded": true,
+  "numpy": "2.3.5",
+  "platform": "Linux-6.17.0-23-generic-x86_64-with-glibc2.39",
+  "scope": "XGrammar tool-call packed bitmask dispatch",
+  "torch": "2.14.1+cu130",
   "xgrammar": "0.2.7",
   "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
 }

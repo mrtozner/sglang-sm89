@@ -25,68 +25,47 @@ services:
       SGLANG_SM89_FP8_VERIFY_HEAD: ${SGLANG_SM89_FP8_VERIFY_HEAD:-0}
       SGLANG_SM89_SAM_GRAFT: ${SGLANG_SM89_SAM_GRAFT:-0}
     command:
-      - python
+      - python3
       - -m
       - sglang.launch_server
-      - --model-path
-      - ${MODEL_PATH:-Qwen/Qwen3.8-27B-FP8}
-      - --host
-      - 0.0.0.0
-      - --port
-      - '30000'
-      - --quantization
-      - fp8
-      - --kv-cache-dtype
-      - ${SGLANG_KV_CACHE_DTYPE:-fp8_e4m3}
-      - --mem-fraction-static
-      - '0.90'
-      - --context-length
-      - '16384'
-      - --max-running-requests
-      - '12'
-      - --cuda-graph-max-bs-decode
-      - '12'
+      - --host=0.0.0.0
+      - --port=30000
+      - --model-path=${MODEL_PATH:-Qwen/Qwen3.8-27B-FP8}
+      - --quantization=fp8
+      - --kv-cache-dtype=${SGLANG_KV_CACHE_DTYPE:-fp8_e4m3}
+      - --context-length=16384
+      - --mem-fraction-static=0.90
+      - --max-running-requests=12
+      - --cuda-graph-max-bs-decode=12
+      - --schedule-policy=lpm
+      - --attention-backend=flashinfer
       - --disable-prefill-cuda-graph
-      - --schedule-policy
-      - lpm
-      - --attention-backend
-      - flashinfer
-      - --linear-attn-backend
-      - triton
-      - --enable-linear-replayssm-spec
-      - --linear-replayssm-cache-len
-      - '16'
-      - --mamba-ssm-dtype
-      - bfloat16
-      - --mm-feature-transport
-      - cpu
-      - --speculative-algorithm
-      - DFLASH
-      - --speculative-draft-model-path
-      - ${DRAFT_MODEL_PATH:-z-lab/Qwen3.8-27B-DFlash2}
-      - --speculative-draft-model-quantization
-      - unquant
-      - --speculative-num-draft-tokens
-      - '8'
-      - --max-mamba-cache-size
-      - '60'
-      - --grammar-backend
-      - xgrammar
+      - --grammar-backend=xgrammar
       - --enable-dynamic-batch-tokenizer
+      - --linear-attn-backend=triton
+      - --mamba-ssm-dtype=bfloat16
+      - --max-mamba-cache-size=60
+      - --enable-linear-replayssm-spec
+      - --linear-replayssm-cache-len=16
+      - --mm-feature-transport=cpu
+      - --speculative-algorithm=DFLASH
+      - --speculative-draft-model-path=${DRAFT_MODEL_PATH:-z-lab/Qwen3.8-27B-DFlash2}
+      - --speculative-draft-model-quantization=unquant
+      - --speculative-num-draft-tokens=8
       - --enable-cache-report
       - --enable-metrics
     volumes:
-      - sglang-hf-cache:/root/.cache/huggingface
-      - sglang-torch-cache:/root/.cache/torch
-      - sglang-triton-cache:/root/.triton
       - ${SGLANG_SM89_CONFIG_CACHE:-~/.cache/sglang-sm89/fp8_configs}:/root/.cache/sglang-sm89/fp8_configs
+      - sglang-triton-cache:/root/.triton
+      - sglang-torch-cache:/root/.cache/torch
+      - sglang-hf-cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
+            - capabilities: [gpu]
               device_ids: ['0']
-              capabilities: [gpu]
+              driver: nvidia
 
 volumes:
   sglang-hf-cache:

@@ -14,6 +14,7 @@ namespace sglang_sm89 {
 namespace {
 
 constexpr int kHeadDim = 128;
+constexpr int kSmemKStride = 132;
 constexpr int kBV = 64;
 constexpr int kMaxSpecLen = 16;
 constexpr int kMaxCacheLen = 64;
@@ -146,12 +147,28 @@ __device__ __forceinline__ void mma_m16n8k8_tf32(
 #endif
 }
 
-template <typename StateT>
+template <int kMaxSpec>
+union SharedScratch {
+    uint4 h0_u4[64][4];
+    struct {
+        float k_hist[8][kSmemKStride];
+        float d_hist[8][kBV + 1];
+    } ring;
+    struct {
+        float hw_q[kMaxSpec][kBV + 1];
+        float hw_k[kMaxSpec][kBV + 1];
+    } hw;
+};
+
+template <typename StateT, int kMaxSpec>
 __device__ __forceinline__ void h0_mma_pass(
     const StateT* __restrict__ h0_head,
-    const float smem_q[kMaxSpecLen][kHeadDim],
-    const float smem_k[kMaxSpecLen][kHeadDim],
-    int v_row_base,
+    SharedScratch<kMaxSpec>& s_scratch,
+    const float smem_q[kMaxSpec][kSmemKStride],
+    const float smem_k[kMaxSpec][kSmemKStride],
+    int v_base,
+    int warp,
+    int tid,
     int spec_len,
     int groupID,
     int tid_in_group,
@@ -159,70 +176,160 @@ __device__ __forceinline__ void h0_mma_pass(
     float d_q1[4],
     float d_k0[4],
     float d_k1[4]) {
+    const int col_u4 = tid & 3;
+    const int row_base_t = tid >> 2;
+    const int r0 = warp * 16 + groupID;
+    const int r1 = r0 + 8;
+    const int swiz = (r0 >> 1) & 3;
+
     if constexpr (std::is_same_v<StateT, __nv_bfloat16>) {
-        // BF16 h0 -> native mma.sync.m16n8k16.f32.bf16.bf16.f32
-        const int k_base0 = tid_in_group * 2;
-        for (int kk = 0; kk < 8; ++kk) {
-            const int k_off = kk * 16 + k_base0;
-            const __nv_bfloat16* p0 = reinterpret_cast<const __nv_bfloat16*>(h0_head)
-                + static_cast<size_t>(v_row_base + groupID) * kHeadDim + k_off;
-            const __nv_bfloat16* p1 = reinterpret_cast<const __nv_bfloat16*>(h0_head)
-                + static_cast<size_t>(v_row_base + groupID + 8) * kHeadDim + k_off;
-            const uint32_t a0 = *reinterpret_cast<const uint32_t*>(p0);
-            const uint32_t a1 = *reinterpret_cast<const uint32_t*>(p1);
-            const uint32_t a2 = *reinterpret_cast<const uint32_t*>(p0 + 8);
-            const uint32_t a3 = *reinterpret_cast<const uint32_t*>(p1 + 8);
-
-            const uint32_t bq0 = (groupID < spec_len) ? pack_bf16_pair(smem_q[groupID][k_off], smem_q[groupID][k_off + 1]) : 0u;
-            const uint32_t bq1 = (groupID < spec_len) ? pack_bf16_pair(smem_q[groupID][k_off + 8], smem_q[groupID][k_off + 9]) : 0u;
-            const uint32_t bk0 = (groupID < spec_len) ? pack_bf16_pair(smem_k[groupID][k_off], smem_k[groupID][k_off + 1]) : 0u;
-            const uint32_t bk1 = (groupID < spec_len) ? pack_bf16_pair(smem_k[groupID][k_off + 8], smem_k[groupID][k_off + 9]) : 0u;
-            mma_m16n8k16_bf16(d_q0, a0, a1, a2, a3, bq0, bq1);
-            mma_m16n8k16_bf16(d_k0, a0, a1, a2, a3, bk0, bk1);
-
-            if (spec_len > 8) {
-                const int t_hi = 8 + groupID;
-                const uint32_t bq2 = (t_hi < spec_len) ? pack_bf16_pair(smem_q[t_hi][k_off], smem_q[t_hi][k_off + 1]) : 0u;
-                const uint32_t bq3 = (t_hi < spec_len) ? pack_bf16_pair(smem_q[t_hi][k_off + 8], smem_q[t_hi][k_off + 9]) : 0u;
-                const uint32_t bk2 = (t_hi < spec_len) ? pack_bf16_pair(smem_k[t_hi][k_off], smem_k[t_hi][k_off + 1]) : 0u;
-                const uint32_t bk3 = (t_hi < spec_len) ? pack_bf16_pair(smem_k[t_hi][k_off + 8], smem_k[t_hi][k_off + 9]) : 0u;
-                mma_m16n8k16_bf16(d_q1, a0, a1, a2, a3, bq2, bq3);
-                mma_m16n8k16_bf16(d_k1, a0, a1, a2, a3, bk2, bk3);
+        // Coalesced uint4 staging (64x32 BF16 per chunk) -> conflict-free swizzled smem -> mma.sync.m16n8k16
+        #pragma unroll 1
+        for (int k_chunk = 0; k_chunk < 4; ++k_chunk) {
+            const int k_base = k_chunk * 32;
+            #pragma unroll
+            for (int iter = 0; iter < 2; ++iter) {
+                const int r = row_base_t + iter * 32;
+                const uint4* g_row = reinterpret_cast<const uint4*>(
+                    reinterpret_cast<const __nv_bfloat16*>(h0_head)
+                    + static_cast<size_t>(v_base + r) * kHeadDim + k_base);
+                s_scratch.h0_u4[r][col_u4 ^ ((r >> 1) & 3)] = g_row[col_u4];
             }
+            __syncthreads();
+
+            #pragma unroll
+            for (int kk = 0; kk < 2; ++kk) {
+                const int k_off = k_base + kk * 16 + tid_in_group * 2;
+                const uint4* p_r0_even = &s_scratch.h0_u4[r0][(kk * 2) ^ swiz];
+                const uint4* p_r1_even = &s_scratch.h0_u4[r1][(kk * 2) ^ swiz];
+                const uint4* p_r0_odd = &s_scratch.h0_u4[r0][(kk * 2 + 1) ^ swiz];
+                const uint4* p_r1_odd = &s_scratch.h0_u4[r1][(kk * 2 + 1) ^ swiz];
+                const uint32_t a0 = reinterpret_cast<const uint32_t*>(p_r0_even)[tid_in_group];
+                const uint32_t a1 = reinterpret_cast<const uint32_t*>(p_r1_even)[tid_in_group];
+                const uint32_t a2 = reinterpret_cast<const uint32_t*>(p_r0_odd)[tid_in_group];
+                const uint32_t a3 = reinterpret_cast<const uint32_t*>(p_r1_odd)[tid_in_group];
+
+                const uint32_t bq0 = (groupID < spec_len) ? pack_bf16_pair(smem_q[groupID][k_off], smem_q[groupID][k_off + 1]) : 0u;
+                const uint32_t bq1 = (groupID < spec_len) ? pack_bf16_pair(smem_q[groupID][k_off + 8], smem_q[groupID][k_off + 9]) : 0u;
+                const uint32_t bk0 = (groupID < spec_len) ? pack_bf16_pair(smem_k[groupID][k_off], smem_k[groupID][k_off + 1]) : 0u;
+                const uint32_t bk1 = (groupID < spec_len) ? pack_bf16_pair(smem_k[groupID][k_off + 8], smem_k[groupID][k_off + 9]) : 0u;
+                mma_m16n8k16_bf16(d_q0, a0, a1, a2, a3, bq0, bq1);
+                mma_m16n8k16_bf16(d_k0, a0, a1, a2, a3, bk0, bk1);
+
+                if constexpr (kMaxSpec > 8) {
+                    if (spec_len > 8) {
+                        const int t_hi = 8 + groupID;
+                        const uint32_t bq2 = (t_hi < spec_len) ? pack_bf16_pair(smem_q[t_hi][k_off], smem_q[t_hi][k_off + 1]) : 0u;
+                        const uint32_t bq3 = (t_hi < spec_len) ? pack_bf16_pair(smem_q[t_hi][k_off + 8], smem_q[t_hi][k_off + 9]) : 0u;
+                        const uint32_t bk2 = (t_hi < spec_len) ? pack_bf16_pair(smem_k[t_hi][k_off], smem_k[t_hi][k_off + 1]) : 0u;
+                        const uint32_t bk3 = (t_hi < spec_len) ? pack_bf16_pair(smem_k[t_hi][k_off + 8], smem_k[t_hi][k_off + 9]) : 0u;
+                        mma_m16n8k16_bf16(d_q1, a0, a1, a2, a3, bq2, bq3);
+                        mma_m16n8k16_bf16(d_k1, a0, a1, a2, a3, bk2, bk3);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+    } else if constexpr (std::is_same_v<StateT, float>) {
+        // Coalesced uint4 staging (64x16 FP32 per chunk) -> conflict-free swizzled smem -> mma.sync.m16n8k8.tf32
+        #pragma unroll 1
+        for (int k_chunk = 0; k_chunk < 8; ++k_chunk) {
+            const int k_base = k_chunk * 16;
+            #pragma unroll
+            for (int iter = 0; iter < 2; ++iter) {
+                const int r = row_base_t + iter * 32;
+                const uint4* g_row = reinterpret_cast<const uint4*>(
+                    reinterpret_cast<const float*>(h0_head)
+                    + static_cast<size_t>(v_base + r) * kHeadDim + k_base);
+                s_scratch.h0_u4[r][col_u4 ^ ((r >> 1) & 3)] = g_row[col_u4];
+            }
+            __syncthreads();
+
+            #pragma unroll
+            for (int kk = 0; kk < 2; ++kk) {
+                const int k_off = k_base + kk * 8 + tid_in_group;
+                const uint4* p_r0_even = &s_scratch.h0_u4[r0][(kk * 2) ^ swiz];
+                const uint4* p_r1_even = &s_scratch.h0_u4[r1][(kk * 2) ^ swiz];
+                const uint4* p_r0_odd = &s_scratch.h0_u4[r0][(kk * 2 + 1) ^ swiz];
+                const uint4* p_r1_odd = &s_scratch.h0_u4[r1][(kk * 2 + 1) ^ swiz];
+                const uint32_t a0 = f32_to_tf32(reinterpret_cast<const float*>(p_r0_even)[tid_in_group]);
+                const uint32_t a1 = f32_to_tf32(reinterpret_cast<const float*>(p_r1_even)[tid_in_group]);
+                const uint32_t a2 = f32_to_tf32(reinterpret_cast<const float*>(p_r0_odd)[tid_in_group]);
+                const uint32_t a3 = f32_to_tf32(reinterpret_cast<const float*>(p_r1_odd)[tid_in_group]);
+
+                const uint32_t bq0 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off]) : 0u;
+                const uint32_t bq1 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off + 4]) : 0u;
+                const uint32_t bk0 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off]) : 0u;
+                const uint32_t bk1 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off + 4]) : 0u;
+                mma_m16n8k8_tf32(d_q0, a0, a1, a2, a3, bq0, bq1);
+                mma_m16n8k8_tf32(d_k0, a0, a1, a2, a3, bk0, bk1);
+
+                if constexpr (kMaxSpec > 8) {
+                    if (spec_len > 8) {
+                        const int t_hi = 8 + groupID;
+                        const uint32_t bq2 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off]) : 0u;
+                        const uint32_t bq3 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off + 4]) : 0u;
+                        const uint32_t bk2 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off]) : 0u;
+                        const uint32_t bk3 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off + 4]) : 0u;
+                        mma_m16n8k8_tf32(d_q1, a0, a1, a2, a3, bq2, bq3);
+                        mma_m16n8k8_tf32(d_k1, a0, a1, a2, a3, bk2, bk3);
+                    }
+                }
+            }
+            __syncthreads();
         }
     } else {
-        // FP32 or FP16 h0 -> mma.sync.m16n8k8.f32.tf32.tf32.f32
-        for (int kk = 0; kk < 16; ++kk) {
-            const int k_off = kk * 8 + tid_in_group;
-            const StateT* p0 = h0_head + static_cast<size_t>(v_row_base + groupID) * kHeadDim + k_off;
-            const StateT* p1 = h0_head + static_cast<size_t>(v_row_base + groupID + 8) * kHeadDim + k_off;
-            const uint32_t a0 = f32_to_tf32(to_float(p0[0]));
-            const uint32_t a1 = f32_to_tf32(to_float(p1[0]));
-            const uint32_t a2 = f32_to_tf32(to_float(p0[4]));
-            const uint32_t a3 = f32_to_tf32(to_float(p1[4]));
-
-            const uint32_t bq0 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off]) : 0u;
-            const uint32_t bq1 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off + 4]) : 0u;
-            const uint32_t bk0 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off]) : 0u;
-            const uint32_t bk1 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off + 4]) : 0u;
-            mma_m16n8k8_tf32(d_q0, a0, a1, a2, a3, bq0, bq1);
-            mma_m16n8k8_tf32(d_k0, a0, a1, a2, a3, bk0, bk1);
-
-            if (spec_len > 8) {
-                const int t_hi = 8 + groupID;
-                const uint32_t bq2 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off]) : 0u;
-                const uint32_t bq3 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off + 4]) : 0u;
-                const uint32_t bk2 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off]) : 0u;
-                const uint32_t bk3 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off + 4]) : 0u;
-                mma_m16n8k8_tf32(d_q1, a0, a1, a2, a3, bq2, bq3);
-                mma_m16n8k8_tf32(d_k1, a0, a1, a2, a3, bk2, bk3);
+        // Coalesced uint4 staging (64x32 FP16 per chunk) -> conflict-free swizzled smem -> mma.sync.m16n8k8.tf32
+        #pragma unroll 1
+        for (int k_chunk = 0; k_chunk < 4; ++k_chunk) {
+            const int k_base = k_chunk * 32;
+            #pragma unroll
+            for (int iter = 0; iter < 2; ++iter) {
+                const int r = row_base_t + iter * 32;
+                const uint4* g_row = reinterpret_cast<const uint4*>(
+                    reinterpret_cast<const __half*>(h0_head)
+                    + static_cast<size_t>(v_base + r) * kHeadDim + k_base);
+                s_scratch.h0_u4[r][col_u4 ^ ((r >> 1) & 3)] = g_row[col_u4];
             }
+            __syncthreads();
+
+            #pragma unroll
+            for (int kk = 0; kk < 4; ++kk) {
+                const int k_off = k_base + kk * 8 + tid_in_group;
+                const __half* h0_e = reinterpret_cast<const __half*>(&s_scratch.h0_u4[r0][kk ^ swiz]);
+                const __half* h1_e = reinterpret_cast<const __half*>(&s_scratch.h0_u4[r1][kk ^ swiz]);
+                const uint32_t a0 = f32_to_tf32(__half2float(h0_e[tid_in_group]));
+                const uint32_t a1 = f32_to_tf32(__half2float(h1_e[tid_in_group]));
+                const uint32_t a2 = f32_to_tf32(__half2float(h0_e[tid_in_group + 4]));
+                const uint32_t a3 = f32_to_tf32(__half2float(h1_e[tid_in_group + 4]));
+
+                const uint32_t bq0 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off]) : 0u;
+                const uint32_t bq1 = (groupID < spec_len) ? f32_to_tf32(smem_q[groupID][k_off + 4]) : 0u;
+                const uint32_t bk0 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off]) : 0u;
+                const uint32_t bk1 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off + 4]) : 0u;
+                mma_m16n8k8_tf32(d_q0, a0, a1, a2, a3, bq0, bq1);
+                mma_m16n8k8_tf32(d_k0, a0, a1, a2, a3, bk0, bk1);
+
+                if constexpr (kMaxSpec > 8) {
+                    if (spec_len > 8) {
+                        const int t_hi = 8 + groupID;
+                        const uint32_t bq2 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off]) : 0u;
+                        const uint32_t bq3 = (t_hi < spec_len) ? f32_to_tf32(smem_q[t_hi][k_off + 4]) : 0u;
+                        const uint32_t bk2 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off]) : 0u;
+                        const uint32_t bk3 = (t_hi < spec_len) ? f32_to_tf32(smem_k[t_hi][k_off + 4]) : 0u;
+                        mma_m16n8k8_tf32(d_q1, a0, a1, a2, a3, bq2, bq3);
+                        mma_m16n8k8_tf32(d_k1, a0, a1, a2, a3, bk2, bk3);
+                    }
+                }
+            }
+            __syncthreads();
         }
     }
 }
 
+template <int kMaxSpec>
 __device__ __forceinline__ void store_mma_frag_to_smem(
-    float smem[kMaxSpecLen][kBV + 1],
+    float smem[kMaxSpec][kBV + 1],
     const float d0[4],
     const float d1[4],
     int warp,
@@ -241,22 +348,26 @@ __device__ __forceinline__ void store_mma_frag_to_smem(
         smem[t1][r0] = d0[1];
         smem[t1][r1] = d0[3];
     }
-    if (spec_len > 8) {
-        const int t2 = 8 + t0;
-        const int t3 = 8 + t1;
-        if (t2 < spec_len) {
-            smem[t2][r0] = d1[0];
-            smem[t2][r1] = d1[2];
-        }
-        if (t3 < spec_len) {
-            smem[t3][r0] = d1[1];
-            smem[t3][r1] = d1[3];
+    if constexpr (kMaxSpec > 8) {
+        if (spec_len > 8) {
+            const int t2 = 8 + t0;
+            const int t3 = 8 + t1;
+            if (t2 < spec_len) {
+                smem[t2][r0] = d1[0];
+                smem[t2][r1] = d1[2];
+            }
+            if (t3 < spec_len) {
+                smem[t3][r0] = d1[1];
+                smem[t3][r1] = d1[3];
+            }
         }
     }
 }
 
-template <typename ActT, typename StateT, typename CacheT, bool IS_FLUSH>
-__global__ void __launch_bounds__(kBlockThreads, 2)
+template <typename ActT, typename StateT, typename CacheT, bool IS_FLUSH, int kMaxSpec>
+__global__ void __launch_bounds__(
+    kBlockThreads,
+    (kMaxSpec <= 8 && std::is_same_v<StateT, __nv_bfloat16>) ? 6 : ((kMaxSpec <= 8) ? 4 : 2))
 wy_gdn_replayssm_verify_kernel(
     const ActT* __restrict__ q,
     const ActT* __restrict__ k,
@@ -329,7 +440,7 @@ wy_gdn_replayssm_verify_kernel(
     const int64_t eos = read_idx(query_start_loc, i_n + 1, stride_qsl, qsl_i64);
     int spec_len = static_cast<int>(eos - bos);
     if (spec_len <= 0) return;
-    if (spec_len > kMaxSpecLen) spec_len = kMaxSpecLen;
+    if (spec_len > kMaxSpec) spec_len = kMaxSpec;
 
     const int64_t state_idx = read_idx(ssm_state_indices, i_n, stride_indices, state_idx_i64);
     const int64_t replay_idx = read_idx(replay_indices, i_n, stride_replay_indices, replay_idx_i64);
@@ -362,22 +473,19 @@ wy_gdn_replayssm_verify_kernel(
     const int b_cache_base = static_cast<int>(read_idx(cache_base, replay_idx, stride_cb, cb_i64));
     const int cache_mask = max_cache_len - 1;
 
-    __shared__ float smem_q[kMaxSpecLen][kHeadDim];
-    __shared__ float smem_k[kMaxSpecLen][kHeadDim];
-    __shared__ float s_hw_q[kMaxSpecLen][kBV + 1];
-    __shared__ float s_hw_k[kMaxSpecLen][kBV + 1];
-    __shared__ float s_kk[kMaxSpecLen][kMaxSpecLen];
-    __shared__ float s_kq[kMaxSpecLen][kMaxSpecLen];
-    __shared__ float s_A[kMaxSpecLen][kMaxSpecLen];
-    __shared__ float s_F[kMaxSpecLen][kMaxSpecLen];
-    __shared__ float s_k_hist[8][kHeadDim];
-    __shared__ float s_d_hist[8][kBV + 1];
-    __shared__ float s_qnorm[kMaxSpecLen][4];
-    __shared__ float s_knorm[kMaxSpecLen][4];
-    __shared__ float s_g[kMaxSpecLen];
-    __shared__ float s_G[kMaxSpecLen];
-    __shared__ float s_expG[kMaxSpecLen];
-    __shared__ float s_beta[kMaxSpecLen];
+    __shared__ float smem_q[kMaxSpec][kSmemKStride];
+    __shared__ float smem_k[kMaxSpec][kSmemKStride];
+    __shared__ float s_kk[kMaxSpec][kMaxSpec];
+    __shared__ float s_kq[kMaxSpec][kMaxSpec];
+    __shared__ float s_A[kMaxSpec][kMaxSpec];
+    __shared__ float s_F[kMaxSpec][kMaxSpec];
+    __shared__ SharedScratch<kMaxSpec> s_scratch;
+    __shared__ float s_qnorm[kMaxSpec][4];
+    __shared__ float s_knorm[kMaxSpec][4];
+    __shared__ float s_g[kMaxSpec];
+    __shared__ float s_G[kMaxSpec];
+    __shared__ float s_expG[kMaxSpec];
+    __shared__ float s_beta[kMaxSpec];
     __shared__ float s_replay_decay[kMaxCacheLen];
     __shared__ float s_total_decay;
 
@@ -469,8 +577,8 @@ wy_gdn_replayssm_verify_kernel(
     float d_k0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float d_k1[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    h0_mma_pass<StateT>(
-        h0_head, smem_q, smem_k, v_base + warp * 16, spec_len,
+    h0_mma_pass<StateT, kMaxSpec>(
+        h0_head, s_scratch, smem_q, smem_k, v_base, warp, tid, spec_len,
         groupID, tid_in_group, d_q0, d_q1, d_k0, d_k1);
 
     // 4. Fold circular ring history into d_q0..d_k1 when !IS_FLUSH && b_write_pos > 0
@@ -501,9 +609,11 @@ wy_gdn_replayssm_verify_kernel(
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 d_q0[i] *= total_decay;
-                d_q1[i] *= total_decay;
                 d_k0[i] *= total_decay;
-                d_k1[i] *= total_decay;
+                if constexpr (kMaxSpec > 8) {
+                    d_q1[i] *= total_decay;
+                    d_k1[i] *= total_decay;
+                }
             }
 
             for (int c_blk = 0; c_blk < b_write_pos; c_blk += 8) {
@@ -519,7 +629,7 @@ wy_gdn_replayssm_verify_kernel(
                                             + (static_cast<size_t>(i_h) * max_cache_len + phys_c) * kHeadDim + tid;
                         kh += to_float(rawk_cache[rk_off]);
                     }
-                    s_k_hist[u][tid] = kh;
+                    s_scratch.ring.k_hist[u][tid] = kh;
 
                     if (tid < kBV) {
                         const size_t d_off = static_cast<size_t>(replay_idx) * stride_d_slot
@@ -530,12 +640,12 @@ wy_gdn_replayssm_verify_kernel(
                                                 + (static_cast<size_t>(i_hv) * max_cache_len + phys_c) * kHeadDim + (v_base + tid);
                             dh += to_float(rawv_cache[rv_off]);
                         }
-                        s_d_hist[u][tid] = s_replay_decay[c] * dh;
+                        s_scratch.ring.d_hist[u][tid] = s_replay_decay[c] * dh;
                     }
                 }
                 for (int u = cnt; u < 8; ++u) {
-                    s_k_hist[u][tid] = 0.0f;
-                    if (tid < kBV) s_d_hist[u][tid] = 0.0f;
+                    s_scratch.ring.k_hist[u][tid] = 0.0f;
+                    if (tid < kBV) s_scratch.ring.d_hist[u][tid] = 0.0f;
                 }
                 __syncthreads();
 
@@ -545,28 +655,36 @@ wy_gdn_replayssm_verify_kernel(
                     const int t_row0 = groupID;
                     const int t_row1 = groupID + 8;
                     float p_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                    const float (*src_mat)[kHeadDim] = is_q ? smem_q : smem_k;
+                    const float (*src_mat)[kSmemKStride] = is_q ? smem_q : smem_k;
                     for (int kk = 0; kk < 16; ++kk) {
                         const int k_off = kk * 8 + tid_in_group;
                         const uint32_t a0 = (t_row0 < spec_len) ? f32_to_tf32(src_mat[t_row0][k_off]) : 0u;
-                        const uint32_t a1 = (t_row1 < spec_len) ? f32_to_tf32(src_mat[t_row1][k_off]) : 0u;
                         const uint32_t a2 = (t_row0 < spec_len) ? f32_to_tf32(src_mat[t_row0][k_off + 4]) : 0u;
-                        const uint32_t a3 = (t_row1 < spec_len) ? f32_to_tf32(src_mat[t_row1][k_off + 4]) : 0u;
+                        uint32_t a1 = 0u;
+                        uint32_t a3 = 0u;
+                        if constexpr (kMaxSpec > 8) {
+                            if (t_row1 < spec_len) {
+                                a1 = f32_to_tf32(src_mat[t_row1][k_off]);
+                                a3 = f32_to_tf32(src_mat[t_row1][k_off + 4]);
+                            }
+                        }
 
-                        const uint32_t b0 = f32_to_tf32(s_k_hist[groupID][k_off]);
-                        const uint32_t b1 = f32_to_tf32(s_k_hist[groupID][k_off + 4]);
+                        const uint32_t b0 = f32_to_tf32(s_scratch.ring.k_hist[groupID][k_off]);
+                        const uint32_t b1 = f32_to_tf32(s_scratch.ring.k_hist[groupID][k_off + 4]);
                         mma_m16n8k8_tf32(p_acc, a0, a1, a2, a3, b0, b1);
                     }
                     const int u0 = tid_in_group * 2;
                     const int u1 = u0 + 1;
-                    float (*dst_mat)[kMaxSpecLen] = is_q ? s_A : s_F;
+                    float (*dst_mat)[kMaxSpec] = is_q ? s_A : s_F;
                     if (t_row0 < spec_len) {
                         dst_mat[t_row0][u0] = p_acc[0];
                         dst_mat[t_row0][u1] = p_acc[1];
                     }
-                    if (t_row1 < spec_len) {
-                        dst_mat[t_row1][u0] = p_acc[2];
-                        dst_mat[t_row1][u1] = p_acc[3];
+                    if constexpr (kMaxSpec > 8) {
+                        if (t_row1 < spec_len) {
+                            dst_mat[t_row1][u0] = p_acc[2];
+                            dst_mat[t_row1][u1] = p_acc[3];
+                        }
                     }
                 }
                 __syncthreads();
@@ -575,10 +693,10 @@ wy_gdn_replayssm_verify_kernel(
                 {
                     const int r0 = warp * 16 + groupID;
                     const int r1 = r0 + 8;
-                    const uint32_t a0 = f32_to_tf32(s_d_hist[tid_in_group][r0]);
-                    const uint32_t a1 = f32_to_tf32(s_d_hist[tid_in_group][r1]);
-                    const uint32_t a2 = f32_to_tf32(s_d_hist[tid_in_group + 4][r0]);
-                    const uint32_t a3 = f32_to_tf32(s_d_hist[tid_in_group + 4][r1]);
+                    const uint32_t a0 = f32_to_tf32(s_scratch.ring.d_hist[tid_in_group][r0]);
+                    const uint32_t a1 = f32_to_tf32(s_scratch.ring.d_hist[tid_in_group][r1]);
+                    const uint32_t a2 = f32_to_tf32(s_scratch.ring.d_hist[tid_in_group + 4][r0]);
+                    const uint32_t a3 = f32_to_tf32(s_scratch.ring.d_hist[tid_in_group + 4][r1]);
 
                     const uint32_t bq0 = (groupID < spec_len) ? f32_to_tf32(s_A[groupID][tid_in_group]) : 0u;
                     const uint32_t bq1 = (groupID < spec_len) ? f32_to_tf32(s_A[groupID][tid_in_group + 4]) : 0u;
@@ -587,23 +705,22 @@ wy_gdn_replayssm_verify_kernel(
                     mma_m16n8k8_tf32(d_q0, a0, a1, a2, a3, bq0, bq1);
                     mma_m16n8k8_tf32(d_k0, a0, a1, a2, a3, bk0, bk1);
 
-                    if (spec_len > 8) {
-                        const int t_hi = 8 + groupID;
-                        const uint32_t bq2 = (t_hi < spec_len) ? f32_to_tf32(s_A[t_hi][tid_in_group]) : 0u;
-                        const uint32_t bq3 = (t_hi < spec_len) ? f32_to_tf32(s_A[t_hi][tid_in_group + 4]) : 0u;
-                        const uint32_t bk2 = (t_hi < spec_len) ? f32_to_tf32(s_F[t_hi][tid_in_group]) : 0u;
-                        const uint32_t bk3 = (t_hi < spec_len) ? f32_to_tf32(s_F[t_hi][tid_in_group + 4]) : 0u;
-                        mma_m16n8k8_tf32(d_q1, a0, a1, a2, a3, bq2, bq3);
-                        mma_m16n8k8_tf32(d_k1, a0, a1, a2, a3, bk2, bk3);
+                    if constexpr (kMaxSpec > 8) {
+                        if (spec_len > 8) {
+                            const int t_hi = 8 + groupID;
+                            const uint32_t bq2 = (t_hi < spec_len) ? f32_to_tf32(s_A[t_hi][tid_in_group]) : 0u;
+                            const uint32_t bq3 = (t_hi < spec_len) ? f32_to_tf32(s_A[t_hi][tid_in_group + 4]) : 0u;
+                            const uint32_t bk2 = (t_hi < spec_len) ? f32_to_tf32(s_F[t_hi][tid_in_group]) : 0u;
+                            const uint32_t bk3 = (t_hi < spec_len) ? f32_to_tf32(s_F[t_hi][tid_in_group + 4]) : 0u;
+                            mma_m16n8k8_tf32(d_q1, a0, a1, a2, a3, bq2, bq3);
+                            mma_m16n8k8_tf32(d_k1, a0, a1, a2, a3, bk2, bk3);
+                        }
                     }
                 }
                 if (c_blk + 8 < b_write_pos) __syncthreads();
             }
         }
     }
-
-    store_mma_frag_to_smem(s_hw_q, d_q0, d_q1, warp, groupID, tid_in_group, spec_len);
-    store_mma_frag_to_smem(s_hw_k, d_k0, d_k1, warp, groupID, tid_in_group, spec_len);
 
     // 5. Compute kk_mat = K @ K^T and kq_mat = K @ Q^T via Tensor Cores (4 warps in parallel)
     {
@@ -614,9 +731,15 @@ wy_gdn_replayssm_verify_kernel(
             for (int kk = 0; kk < 16; ++kk) {
                 const int k_off = kk * 8 + tid_in_group;
                 const uint32_t a0 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off]) : 0u;
-                const uint32_t a1 = (groupID + 8 < spec_len) ? f32_to_tf32(smem_k[groupID + 8][k_off]) : 0u;
                 const uint32_t a2 = (groupID < spec_len) ? f32_to_tf32(smem_k[groupID][k_off + 4]) : 0u;
-                const uint32_t a3 = (groupID + 8 < spec_len) ? f32_to_tf32(smem_k[groupID + 8][k_off + 4]) : 0u;
+                uint32_t a1 = 0u;
+                uint32_t a3 = 0u;
+                if constexpr (kMaxSpec > 8) {
+                    if (groupID + 8 < spec_len) {
+                        a1 = f32_to_tf32(smem_k[groupID + 8][k_off]);
+                        a3 = f32_to_tf32(smem_k[groupID + 8][k_off + 4]);
+                    }
+                }
 
                 const int col_idx = n_base + groupID;
                 uint32_t b0 = 0u, b1 = 0u;
@@ -636,32 +759,37 @@ wy_gdn_replayssm_verify_kernel(
             const int r1 = groupID + 8;
             const int c0 = n_base + tid_in_group * 2;
             const int c1 = c0 + 1;
-            float (*dst)[kMaxSpecLen] = is_kk ? s_kk : s_kq;
+            float (*dst)[kMaxSpec] = is_kk ? s_kk : s_kq;
             if (r0 < spec_len && c0 < spec_len) dst[r0][c0] = acc[0];
             if (r0 < spec_len && c1 < spec_len) dst[r0][c1] = acc[1];
-            if (r1 < spec_len && c0 < spec_len) dst[r1][c0] = acc[2];
-            if (r1 < spec_len && c1 < spec_len) dst[r1][c1] = acc[3];
+            if constexpr (kMaxSpec > 8) {
+                if (r1 < spec_len && c0 < spec_len) dst[r1][c0] = acc[2];
+                if (r1 < spec_len && c1 < spec_len) dst[r1][c1] = acc[3];
+            }
         }
     }
     __syncthreads();
 
-    // 6. Build strictly lower A_mat[i, j] and causal F_mat[j, i]
+    // 6. Store hw_q / hw_k (reusing s_scratch safely after ring + Step 5) & build A_mat, F_mat
+    store_mma_frag_to_smem<kMaxSpec>(s_scratch.hw.hw_q, d_q0, d_q1, warp, groupID, tid_in_group, spec_len);
+    store_mma_frag_to_smem<kMaxSpec>(s_scratch.hw.hw_k, d_k0, d_k1, warp, groupID, tid_in_group, spec_len);
     const int n_sq = spec_len * spec_len;
     for (int idx = tid; idx < n_sq; idx += kBlockThreads) {
         const int i = idx / spec_len;
         const int j = idx - i * spec_len;
-        s_A[i][j] = (i > j) ? (s_beta[i] * expf(s_G[i] - s_G[j]) * s_kk[i][j]) : 0.0f;
-        s_F[j][i] = (j <= i) ? (expf(s_G[i] - s_G[j]) * s_kq[j][i]) : 0.0f;
+        const float exp_ij = (i >= j) ? expf(s_G[i] - s_G[j]) : 0.0f;
+        s_A[i][j] = (i > j) ? (s_beta[i] * exp_ij * s_kk[i][j]) : 0.0f;
+        s_F[j][i] = (j <= i) ? (exp_ij * s_kq[j][i]) : 0.0f;
     }
     __syncthreads();
 
     // 7. Direct forward substitution (I + A_mat) @ D_T = R^T for v = v_base + 0..63
     if (tid < kBV) {
         const int v_col = v_base + tid;
-        float D_spec[kMaxSpecLen];
+        float D_spec[kMaxSpec];
         for (int t = 0; t < spec_len; ++t) {
             const float v_val = to_float(v[static_cast<size_t>(bos + t) * stride_v_t + static_cast<size_t>(i_hv) * kHeadDim + v_col]);
-            float d_val = s_beta[t] * (v_val - s_expG[t] * s_hw_k[t][tid]);
+            float d_val = s_beta[t] * (v_val - s_expG[t] * s_scratch.hw.hw_k[t][tid]);
             for (int j = 0; j < t; ++j) {
                 d_val = fmaf(-s_A[t][j], D_spec[j], d_val);
             }
@@ -687,7 +815,7 @@ wy_gdn_replayssm_verify_kernel(
         }
 
         for (int t = 0; t < spec_len; ++t) {
-            float out_val = s_expG[t] * s_hw_q[t][tid];
+            float out_val = s_expG[t] * s_scratch.hw.hw_q[t][tid];
             for (int j = 0; j <= t; ++j) {
                 out_val = fmaf(D_spec[j], s_F[j][t], out_val);
             }
@@ -919,8 +1047,8 @@ bool is_state_type(at::ScalarType t) {
     return t == at::kBFloat16 || t == at::kHalf || t == at::kFloat;
 }
 
-template <typename ActT, typename StateT, typename CacheT, bool IS_FLUSH>
-void dispatch_verify_kernel(
+template <typename ActT, typename StateT, typename CacheT, bool IS_FLUSH, int kMaxSpec>
+void launch_verify_kernel_inst(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
@@ -966,7 +1094,7 @@ void dispatch_verify_kernel(
     dim3 grid(2, static_cast<unsigned>(B), static_cast<unsigned>(HV));
     dim3 block(kBlockThreads, 1, 1);
 
-    wy_gdn_replayssm_verify_kernel<ActT, StateT, CacheT, IS_FLUSH><<<grid, block, 0, stream>>>(
+    wy_gdn_replayssm_verify_kernel<ActT, StateT, CacheT, IS_FLUSH, kMaxSpec><<<grid, block, 0, stream>>>(
         reinterpret_cast<const ActT*>(q.data_ptr()),
         reinterpret_cast<const ActT*>(k.data_ptr()),
         reinterpret_cast<const ActT*>(v.data_ptr()),
@@ -1024,6 +1152,54 @@ void dispatch_verify_kernel(
         cache_base.scalar_type() == at::kLong);
 }
 
+template <typename ActT, typename StateT, typename CacheT, bool IS_FLUSH>
+void dispatch_verify_kernel(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const at::Tensor& checkpoint_state,
+    at::Tensor& d_cache,
+    at::Tensor& k_cache,
+    at::Tensor& g_cache,
+    const c10::optional<at::Tensor>& rawv_cache,
+    const c10::optional<at::Tensor>& rawk_cache,
+    const c10::optional<at::Tensor>& beta_cache,
+    const at::Tensor& query_start_loc,
+    const at::Tensor& ssm_state_indices,
+    const at::Tensor& replay_indices,
+    const at::Tensor& write_pos,
+    const at::Tensor& cache_base,
+    const at::Tensor& is_flush,
+    at::Tensor& out,
+    int B,
+    int H,
+    int HV,
+    int max_cache_len,
+    int max_spec_len,
+    float scale,
+    float softplus_threshold,
+    cudaStream_t stream) {
+    if (max_spec_len <= 8) {
+        launch_verify_kernel_inst<ActT, StateT, CacheT, IS_FLUSH, 8>(
+            q, k, v, a, b, A_log, dt_bias, checkpoint_state,
+            d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
+            query_start_loc, ssm_state_indices, replay_indices,
+            write_pos, cache_base, is_flush, out,
+            B, H, HV, max_cache_len, scale, softplus_threshold, stream);
+    } else {
+        launch_verify_kernel_inst<ActT, StateT, CacheT, IS_FLUSH, 16>(
+            q, k, v, a, b, A_log, dt_bias, checkpoint_state,
+            d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
+            query_start_loc, ssm_state_indices, replay_indices,
+            write_pos, cache_base, is_flush, out,
+            B, H, HV, max_cache_len, scale, softplus_threshold, stream);
+    }
+}
+
 template <typename ActT, typename StateT, typename CacheT>
 void dispatch_verify_flush(
     bool is_flush_pass,
@@ -1052,6 +1228,7 @@ void dispatch_verify_flush(
     int H,
     int HV,
     int max_cache_len,
+    int max_spec_len,
     float scale,
     float softplus_threshold,
     cudaStream_t stream) {
@@ -1061,14 +1238,14 @@ void dispatch_verify_flush(
             d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
             query_start_loc, ssm_state_indices, replay_indices,
             write_pos, cache_base, is_flush, out,
-            B, H, HV, max_cache_len, scale, softplus_threshold, stream);
+            B, H, HV, max_cache_len, max_spec_len, scale, softplus_threshold, stream);
     } else {
         dispatch_verify_kernel<ActT, StateT, CacheT, false>(
             q, k, v, a, b, A_log, dt_bias, checkpoint_state,
             d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
             query_start_loc, ssm_state_indices, replay_indices,
             write_pos, cache_base, is_flush, out,
-            B, H, HV, max_cache_len, scale, softplus_threshold, stream);
+            B, H, HV, max_cache_len, max_spec_len, scale, softplus_threshold, stream);
     }
 }
 
@@ -1273,6 +1450,7 @@ void wy_gdn_replayssm_verify_cuda(
     const int H_i = static_cast<int>(H);
     const int HV_i = static_cast<int>(HV);
     const int max_c_i = static_cast<int>(max_cache_len);
+    const int max_s_i = static_cast<int>(max_spec_len);
     const float scale_f = static_cast<float>(scale);
     const float sp_thresh_f = static_cast<float>(softplus_threshold);
 
@@ -1283,14 +1461,14 @@ void wy_gdn_replayssm_verify_cuda(
                 d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
                 query_start_loc, ssm_state_indices, replay_indices,
                 write_pos, cache_base, is_flush, out,
-                B_i, H_i, HV_i, max_c_i, scale_f, sp_thresh_f, stream);
+                B_i, H_i, HV_i, max_c_i, max_s_i, scale_f, sp_thresh_f, stream);
         } else if (state_t == at::kFloat) {
             dispatch_verify_flush<__nv_bfloat16, float, __nv_bfloat16>(
                 is_flush_pass, q, k, v, a, b, A_log, dt_bias, checkpoint_state,
                 d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
                 query_start_loc, ssm_state_indices, replay_indices,
                 write_pos, cache_base, is_flush, out,
-                B_i, H_i, HV_i, max_c_i, scale_f, sp_thresh_f, stream);
+                B_i, H_i, HV_i, max_c_i, max_s_i, scale_f, sp_thresh_f, stream);
         } else {
             TORCH_CHECK(false, "Unsupported checkpoint_state dtype for bfloat16 activations");
         }
@@ -1301,14 +1479,14 @@ void wy_gdn_replayssm_verify_cuda(
                 d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
                 query_start_loc, ssm_state_indices, replay_indices,
                 write_pos, cache_base, is_flush, out,
-                B_i, H_i, HV_i, max_c_i, scale_f, sp_thresh_f, stream);
+                B_i, H_i, HV_i, max_c_i, max_s_i, scale_f, sp_thresh_f, stream);
         } else if (state_t == at::kFloat) {
             dispatch_verify_flush<__half, float, __half>(
                 is_flush_pass, q, k, v, a, b, A_log, dt_bias, checkpoint_state,
                 d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
                 query_start_loc, ssm_state_indices, replay_indices,
                 write_pos, cache_base, is_flush, out,
-                B_i, H_i, HV_i, max_c_i, scale_f, sp_thresh_f, stream);
+                B_i, H_i, HV_i, max_c_i, max_s_i, scale_f, sp_thresh_f, stream);
         } else {
             TORCH_CHECK(false, "Unsupported checkpoint_state dtype for float16 activations");
         }
@@ -1319,7 +1497,7 @@ void wy_gdn_replayssm_verify_cuda(
             d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
             query_start_loc, ssm_state_indices, replay_indices,
             write_pos, cache_base, is_flush, out,
-            B_i, H_i, HV_i, max_c_i, scale_f, sp_thresh_f, stream);
+            B_i, H_i, HV_i, max_c_i, max_s_i, scale_f, sp_thresh_f, stream);
     }
 }
 

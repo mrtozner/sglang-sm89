@@ -54,27 +54,32 @@ def event_times_us(operation, iters: int, *, flush_buf: torch.Tensor | None = No
 
 
 class _GateToolGrammar:
-    """Alternating forced-token and two-choice grammar with clean rollback."""
+    """Alternating forced-token and two-choice stateful grammar with clean rollback."""
 
     def __init__(self) -> None:
+        self._step_masks = ((1 << 13), (1 << 13) | (1 << 17))
         self.history = [9]
-        self.allowed_masks = ((1 << 13), (1 << 13) | (1 << 17))
+
+    def _current_mask(self) -> int:
+        parity_idx = (len(self.history) - 1) & 1
+        return self._step_masks[parity_idx]
 
     def is_terminated(self) -> bool:
         return False
 
     def fill_vocab_mask(self, mask: torch.Tensor, row: int) -> None:
         mask[row].zero_()
-        mask[row, 0] = self.allowed_masks[(len(self.history) - 1) % 2]
+        mask[row, 0] = self._current_mask()
 
     def accept_token(self, token: int) -> None:
-        allowed = self.allowed_masks[(len(self.history) - 1) % 2]
-        if token < 0 or token >= 32 or not (allowed & (1 << token)):
-            raise AssertionError(f"Illegal grammar token {token}")
+        allowed_bits = self._current_mask()
+        if not (0 <= token < 32) or not ((allowed_bits >> token) & 1):
+            raise AssertionError(f"Rejected illegal token {token} under mask {bin(allowed_bits)}")
         self.history.append(token)
 
     def rollback(self, count: int) -> None:
-        del self.history[-count:]
+        if count > 0:
+            self.history = self.history[:-count]
 
 
 def run_gate1(iters: int) -> dict:

@@ -1,4 +1,4 @@
-"""Unified SGLang HookRegistry entry point for sglang-sm89 v0.2.0."""
+"""Unified SGLang HookRegistry entry point for sglang-sm89 v0.3.0."""
 
 from __future__ import annotations
 
@@ -54,16 +54,19 @@ def register() -> None:
     if dflash_fp8_on:
         from .draft_fp8 import after_dflash_worker_init, around_compute_candidates
 
-        HookRegistry.register(
-            "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2.__init__",
-            partial(after_dflash_worker_init, quantize_draft=True, quantize_head=True),
-            HookType.AFTER,
-        )
-        HookRegistry.register(
-            "sglang.srt.models.dflash.DFlash2DraftModel.compute_candidates",
-            around_compute_candidates,
-            HookType.AROUND,
-        )
+        for target_path, cb, hook_kind in (
+            (
+                "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2.__init__",
+                partial(after_dflash_worker_init, quantize_draft=True, quantize_head=True),
+                HookType.AFTER,
+            ),
+            (
+                "sglang.srt.models.dflash.DFlash2DraftModel.compute_candidates",
+                around_compute_candidates,
+                HookType.AROUND,
+            ),
+        ):
+            HookRegistry.register(target_path, cb, hook_kind)
 
     if replayssm_on:
         from .gdn_pool_bridge import register_hooks as register_gdn_bridge_hooks
@@ -124,7 +127,7 @@ def register() -> None:
             pass
 
     logger.info(
-        "[sglang_sm89] Registered v0.2.0 hooks (fp8_configs=%s dflash_fp8=%s replayssm=%s "
+        "[sglang_sm89] Registered v0.3.0 hooks (fp8_configs=%s dflash_fp8=%s replayssm=%s "
         "coupled_grammar=%s sparse_proj=%s wy_gdn=%s sam_graft=%s ext_loaded=%s)",
         fp8_configs_on,
         dflash_fp8_on,

@@ -25,20 +25,20 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
-from pathlib import Path
 import re
 import shlex
 import sqlite3
 import statistics
 import subprocess
-import sys
 import threading
 import time
-import urllib.request
 import uuid
+import sys
+import urllib.request
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 
 ENGLISH_PROMPTS = [
@@ -629,20 +629,23 @@ def run_one_request(
     pieces: list[str] = []
     usage: dict = {}
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
+        for raw_bytes in resp:
+            decoded = raw_bytes.decode("utf-8", errors="replace").strip()
+            if not decoded.startswith("data:"):
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
+            payload = decoded.removeprefix("data:").strip()
+            if payload == "[DONE]":
                 break
-            ev = json.loads(data)
-            if ev.get("error"):
-                raise RuntimeError(f"SSE error: {ev['error']}")
-            if ev.get("usage"):
-                usage = ev["usage"]
-            for ch in ev.get("choices") or []:
-                delta = ch.get("delta") or {}
+            event = json.loads(payload)
+            err_msg = event.get("error")
+            if err_msg:
+                raise RuntimeError(f"Stream error from server: {err_msg}")
+            event_usage = event.get("usage")
+            if event_usage:
+                usage = event_usage
+            choices = event.get("choices") or ()
+            for choice in choices:
+                delta = choice.get("delta") or {}
                 piece = (delta.get("content") or "") + (delta.get("reasoning_content") or delta.get("reasoning") or "")
                 if piece:
                     now = time.monotonic()
@@ -854,6 +857,57 @@ def run_benchmark_cell(
     }
 
 
+def prewarm_workloads(
+    *,
+    url: str,
+    model: str,
+    workloads: list[str],
+    temps: list[float],
+    max_concurrency: int,
+    max_tokens: int,
+    enable_thinking: bool,
+    timeout: float,
+    run_nonce: str,
+) -> None:
+    """Compile every (workload, temperature) XGrammar FSM & batched path untimed before trials."""
+    warm_tokens = min(16, max_tokens)
+    for temp in temps:
+        for w in workloads:
+            prompt, rf, _ = build_workload_spec(w, 0, f"{run_nonce}-prewarm-t{temp}-{w}")
+            run_one_request(
+                url=url,
+                model=model,
+                prompt=prompt,
+                temperature=temp,
+                max_tokens=warm_tokens,
+                response_format=rf,
+                enable_thinking=enable_thinking,
+                timeout=timeout,
+            )
+    if max_concurrency > 1:
+        for w in workloads:
+            if w in ("json", "sql"):
+                with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+                    futs = []
+                    for s in range(max_concurrency):
+                        bp, brf, _ = build_workload_spec(w, s, f"{run_nonce}-prewarm-batch-{w}-{s}")
+                        futs.append(
+                            pool.submit(
+                                run_one_request,
+                                url=url,
+                                model=model,
+                                prompt=bp,
+                                temperature=temps[0],
+                                max_tokens=warm_tokens,
+                                response_format=brf,
+                                enable_thinking=enable_thinking,
+                                timeout=timeout,
+                            )
+                        )
+                    for fut in futs:
+                        fut.result()
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     base = args.base_url.rstrip("/")
     snap = fetch_server_snapshot(base, timeout=args.timeout)
@@ -870,6 +924,18 @@ def cmd_run(args: argparse.Namespace) -> None:
     concurrencies = [int(c.strip()) for c in args.concurrencies.split(",") if c.strip()]
     temps = [float(t.strip()) for t in args.temps.split(",") if t.strip()]
     run_nonce = uuid.uuid4().hex[:10]
+
+    prewarm_workloads(
+        url=base + "/v1/chat/completions",
+        model=model,
+        workloads=workloads,
+        temps=temps,
+        max_concurrency=max(concurrencies) if concurrencies else 1,
+        max_tokens=args.max_tokens,
+        enable_thinking=args.enable_thinking,
+        timeout=args.timeout,
+        run_nonce=run_nonce,
+    )
 
     cells = []
     for c in concurrencies:

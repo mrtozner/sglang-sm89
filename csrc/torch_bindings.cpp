@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
+#include "coupled_grammar_cpu.cuh"
 #include "sparse_vocab_proj_sm89.cuh"
 #include "wy_gdn_sm89.cuh"
 
@@ -46,7 +47,7 @@ TORCH_LIBRARY_IMPL(sglang_sm89, CPU, m) {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "Ada Lovelace (sm_89) SGLang CUDA and roofline kernels";
+    m.doc() = "Ada Lovelace (sm_89) SGLang CUDA and CPU acceleration kernels";
     m.def(
         "select_sparse_vocab_proj",
         &sglang_sm89::select_sparse_vocab_proj_cpu,
@@ -54,4 +55,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("vocab_size"),
         py::arg("k_chunk") = 8,
         py::arg("max_eff_row_ratio") = 0.55);
+    m.def(
+        "coupled_refine_step_cpu",
+        &sglang_sm89::coupled_refine_step_cpu,
+        py::arg("mask_row_cpu"),
+        py::arg("draft_row_cpu"),
+        py::arg("cand_row_cpu"),
+        py::arg("q_row_cpu"),
+        py::arg("pos"),
+        py::arg("vocab_size"),
+        py::arg("is_greedy"),
+        py::arg("allow_forced_single"),
+        py::arg("u_draw"),
+        py::arg("reset_mask") = false);
 }

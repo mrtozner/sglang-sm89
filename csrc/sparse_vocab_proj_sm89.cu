@@ -78,6 +78,54 @@ __device__ __forceinline__ uint64_t read_tile_mask64(
     return (static_cast<uint64_t>(lo) | (static_cast<uint64_t>(hi) << 32)) & tile_tail;
 }
 
+__device__ __forceinline__ void accum_slot(
+    int slot,
+    float delta,
+    float& a0,
+    float& a1,
+    float& a2,
+    float& a3,
+    float& a4,
+    float& a5,
+    float& a6,
+    float& a7) {
+    if (slot < 4) {
+        if (slot < 2) {
+            if (slot == 0) a0 += delta;
+            else a1 += delta;
+        } else {
+            if (slot == 2) a2 += delta;
+            else a3 += delta;
+        }
+    } else {
+        if (slot < 6) {
+            if (slot == 4) a4 += delta;
+            else a5 += delta;
+        } else {
+            if (slot == 6) a6 += delta;
+            else a7 += delta;
+        }
+    }
+}
+
+__device__ __forceinline__ float select_slot(
+    int slot,
+    float a0,
+    float a1,
+    float a2,
+    float a3,
+    float a4,
+    float a5,
+    float a6,
+    float a7) {
+    if (slot < 4) {
+        if (slot < 2) return (slot == 0) ? a0 : a1;
+        return (slot == 2) ? a2 : a3;
+    }
+    if (slot < 6) return (slot == 4) ? a4 : a5;
+    return (slot == 6) ? a6 : a7;
+}
+
 template <bool USE_FP8>
 __device__ __forceinline__ void eval_warp_row_group(
     const __nv_bfloat16* __restrict__ hidden,
@@ -92,8 +140,8 @@ __device__ __forceinline__ void eval_warp_row_group(
     int N,
     int K,
     int lane) {
-    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-    float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+    float a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
 
     if constexpr (!USE_FP8) {
         const __nv_bfloat16* w_row =
@@ -119,24 +167,14 @@ __device__ __forceinline__ void eval_warp_row_group(
                 dot = fmaf(wf2.x, xf.x, fmaf(wf2.y, xf.y, dot));
                 xf = bf16_pair_to_float2(xv.w);
                 dot = fmaf(wf3.x, xf.x, fmaf(wf3.y, xf.y, dot));
-
-                switch (j) {
-                    case 0: acc0 += dot; break;
-                    case 1: acc1 += dot; break;
-                    case 2: acc2 += dot; break;
-                    case 3: acc3 += dot; break;
-                    case 4: acc4 += dot; break;
-                    case 5: acc5 += dot; break;
-                    case 6: acc6 += dot; break;
-                    default: acc7 += dot; break;
-                }
+                accum_slot(j, dot, a0, a1, a2, a3, a4, a5, a6, a7);
             }
         }
     } else {
-        const uint8_t* w_row =
-            reinterpret_cast<const uint8_t*>(weight) + static_cast<size_t>(row) * K;
+        const size_t row_off = static_cast<size_t>(row) * K;
+        const uint8_t* w_bytes = reinterpret_cast<const uint8_t*>(weight) + row_off;
         for (int k = lane * 16; k < K; k += 512) {
-            const uint4 wv = __ldg(reinterpret_cast<const uint4*>(w_row + k));
+            const uint4 wv = __ldg(reinterpret_cast<const uint4*>(w_bytes + k));
             const __half2 wh0 = e4m3_pair_to_half2(static_cast<uint16_t>(wv.x & 0xFFFFu));
             const __half2 wh1 = e4m3_pair_to_half2(static_cast<uint16_t>(wv.x >> 16));
             const __half2 wh2 = e4m3_pair_to_half2(static_cast<uint16_t>(wv.y & 0xFFFFu));
@@ -181,34 +219,14 @@ __device__ __forceinline__ void eval_warp_row_group(
                     xf = bf16_pair_to_float2(xv_hi.w);
                     dot = fmaf(wf.x, xf.x, fmaf(wf.y, xf.y, dot));
                 }
-
-                switch (j) {
-                    case 0: acc0 += dot; break;
-                    case 1: acc1 += dot; break;
-                    case 2: acc2 += dot; break;
-                    case 3: acc3 += dot; break;
-                    case 4: acc4 += dot; break;
-                    case 5: acc5 += dot; break;
-                    case 6: acc6 += dot; break;
-                    default: acc7 += dot; break;
-                }
+                accum_slot(j, dot, a0, a1, a2, a3, a4, a5, a6, a7);
             }
         }
     }
 
     #pragma unroll 1
     for (int j = 0; j < m_cnt; ++j) {
-        float sum;
-        switch (j) {
-            case 0: sum = acc0; break;
-            case 1: sum = acc1; break;
-            case 2: sum = acc2; break;
-            case 3: sum = acc3; break;
-            case 4: sum = acc4; break;
-            case 5: sum = acc5; break;
-            case 6: sum = acc6; break;
-            default: sum = acc7; break;
-        }
+        float sum = select_slot(j, a0, a1, a2, a3, a4, a5, a6, a7);
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_xor_sync(0xFFFFFFFFu, sum, offset);
@@ -229,15 +247,9 @@ sparse_vocab_proj_tile64_kernel(
     const float* __restrict__ weight_scale,
     const int32_t* __restrict__ vocab_mask,
     __nv_bfloat16* __restrict__ out,
-    int M,
-    int N,
-    int K,
-    int mask_words) {
-    const int tid = threadIdx.x;
-    const int warp_id = tid >> 5;
-    const int lane = tid & 31;
-    const int tile_id = blockIdx.x;
-    const int row_base = tile_id * kTileV;
+    int M, int N, int K, int mask_words) {
+    const int tid = threadIdx.x, warp_id = tid >> 5, lane = tid & 31;
+    const int tile_id = blockIdx.x, row_base = tile_id * kTileV;
     if (row_base >= N) return;
 
     const int rem_rows = N - row_base;
@@ -281,7 +293,6 @@ sparse_vocab_proj_tile64_kernel(
     const uint64_t u_mask = s_tile_union;
     const __nv_bfloat16 neg_inf = dev_bf16_neg_inf();
 
-    // Dead-tile early exit: zero weight DRAM traffic, coalesced -inf stores.
     if (u_mask == 0ULL) {
         if (tile_rows == kTileV) {
             const int total_cells = M * kTileV;
@@ -301,7 +312,6 @@ sparse_vocab_proj_tile64_kernel(
         return;
     }
 
-    // Warps 0..1 own vocab offsets 0..63 within the tile: write -inf for inactive rows and compact active ones.
     const bool row_valid = (tid < tile_rows) && (((u_mask >> tid) & 1ULL) != 0ULL);
     if (tid < tile_rows && !row_valid) {
         const int row = row_base + tid;
@@ -388,29 +398,55 @@ sparse_vocab_proj_tile64_kernel(
 }
 
 void validate_proj_inputs(
+    const at::Tensor& hidden, const at::Tensor& weight,
+    const at::Tensor& vocab_mask, const at::Tensor& out, int k_align) {
+    TORCH_CHECK(hidden.dim() == 2 && weight.dim() == 2 && vocab_mask.dim() == 2 && out.dim() == 2,
+                "All projection operands must be rank-2 tensors");
+    TORCH_CHECK(hidden.scalar_type() == at::kBFloat16 && out.scalar_type() == at::kBFloat16,
+                "hidden and out must be bfloat16");
+    TORCH_CHECK(vocab_mask.scalar_type() == at::kInt, "vocab_mask must be int32");
+    TORCH_CHECK(hidden.is_cuda() && weight.is_cuda() && vocab_mask.is_cuda() && out.is_cuda(),
+                "Projection operands must reside on CUDA");
+    TORCH_CHECK(hidden.is_contiguous() && weight.is_contiguous() && vocab_mask.is_contiguous() && out.is_contiguous(),
+                "Projection operands must be contiguous");
+
+    const int64_t k_dim = hidden.size(1);
+    const int64_t n_vocab = weight.size(0);
+    const int64_t m_rows = hidden.size(0);
+    TORCH_CHECK(weight.size(1) == k_dim && (k_dim % k_align) == 0,
+                "Invalid K dimension or alignment");
+    TORCH_CHECK(vocab_mask.size(0) == m_rows && vocab_mask.size(1) >= (n_vocab + 31) / 32,
+                "vocab_mask shape incompatible with [M, ceil_div(N, 32)]");
+    TORCH_CHECK(out.size(0) == m_rows && out.size(1) == n_vocab, "out shape mismatch");
+}
+
+template <bool USE_FP8>
+void launch_sparse_vocab_proj(
     const at::Tensor& hidden,
     const at::Tensor& weight,
+    const float* scale_ptr,
     const at::Tensor& vocab_mask,
-    const at::Tensor& out,
-    int k_align) {
-    TORCH_CHECK(hidden.is_cuda() && weight.is_cuda() && vocab_mask.is_cuda() && out.is_cuda(),
-                "hidden, weight, vocab_mask, and out must be CUDA tensors");
-    TORCH_CHECK(hidden.is_contiguous() && weight.is_contiguous() && vocab_mask.is_contiguous() && out.is_contiguous(),
-                "hidden, weight, vocab_mask, and out must be contiguous");
-    TORCH_CHECK(hidden.scalar_type() == at::kBFloat16 && out.scalar_type() == at::kBFloat16,
-                "hidden and out must have dtype bfloat16");
-    TORCH_CHECK(vocab_mask.scalar_type() == at::kInt, "vocab_mask must have dtype int32");
-    TORCH_CHECK(hidden.dim() == 2 && weight.dim() == 2 && vocab_mask.dim() == 2 && out.dim() == 2,
-                "All inputs must be 2D tensors");
+    at::Tensor& out) {
+    const int m_rows = static_cast<int>(hidden.size(0));
+    const int n_vocab = static_cast<int>(weight.size(0));
+    const int k_dim = static_cast<int>(hidden.size(1));
+    const int mask_words = static_cast<int>(vocab_mask.size(1));
+    if (m_rows <= 0 || n_vocab <= 0) return;
 
-    const int64_t M = hidden.size(0);
-    const int64_t K = hidden.size(1);
-    const int64_t N = weight.size(0);
-    TORCH_CHECK(weight.size(1) == K, "weight K dimension mismatch");
-    TORCH_CHECK(K % k_align == 0, "K must be divisible by ", k_align);
-    TORCH_CHECK(vocab_mask.size(0) == M && vocab_mask.size(1) >= (N + 31) / 32,
-                "vocab_mask shape incompatible with [M, ceil_div(N, 32)]");
-    TORCH_CHECK(out.size(0) == M && out.size(1) == N, "out shape mismatch");
+    const at::cuda::OptionalCUDAGuard guard(hidden.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    const dim3 grid((n_vocab + kTileV - 1) / kTileV, 1, 1);
+    const dim3 block(kThreadsPerBlock, 1, 1);
+    sparse_vocab_proj_tile64_kernel<USE_FP8><<<grid, block, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr()),
+        weight.data_ptr(),
+        scale_ptr,
+        vocab_mask.data_ptr<int32_t>(),
+        reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
+        m_rows,
+        n_vocab,
+        k_dim,
+        mask_words);
 }
 
 }  // namespace
@@ -422,63 +458,18 @@ void sparse_vocab_proj_bf16(
     at::Tensor& out) {
     validate_proj_inputs(hidden, weight, vocab_mask, out, 8);
     TORCH_CHECK(weight.scalar_type() == at::kBFloat16, "weight must be bfloat16");
-
-    const int M = static_cast<int>(hidden.size(0));
-    const int N = static_cast<int>(weight.size(0));
-    const int K = static_cast<int>(hidden.size(1));
-    const int mask_words = static_cast<int>(vocab_mask.size(1));
-    if (M <= 0 || N <= 0) return;
-
-    const at::cuda::OptionalCUDAGuard device_guard(hidden.device());
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-
-    dim3 grid((N + kTileV - 1) / kTileV, 1, 1);
-    dim3 block(kThreadsPerBlock, 1, 1);
-    sparse_vocab_proj_tile64_kernel<false><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr()),
-        weight.data_ptr(),
-        nullptr,
-        vocab_mask.data_ptr<int32_t>(),
-        reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
-        M,
-        N,
-        K,
-        mask_words);
+    launch_sparse_vocab_proj<false>(hidden, weight, nullptr, vocab_mask, out);
 }
 
 void sparse_vocab_proj_fp8(
-    const at::Tensor& hidden,
-    const at::Tensor& weight,
-    const at::Tensor& weight_scale,
-    const at::Tensor& vocab_mask,
-    at::Tensor& out) {
+    const at::Tensor& hidden, const at::Tensor& weight,
+    const at::Tensor& weight_scale, const at::Tensor& vocab_mask, at::Tensor& out) {
     validate_proj_inputs(hidden, weight, vocab_mask, out, 16);
     TORCH_CHECK(weight.scalar_type() == at::kFloat8_e4m3fn, "weight must be float8_e4m3fn");
     TORCH_CHECK(weight_scale.is_cuda() && weight_scale.is_contiguous() && weight_scale.scalar_type() == at::kFloat,
                 "weight_scale must be contiguous CUDA float32");
     TORCH_CHECK(weight_scale.numel() == weight.size(0), "weight_scale length must equal N");
-
-    const int M = static_cast<int>(hidden.size(0));
-    const int N = static_cast<int>(weight.size(0));
-    const int K = static_cast<int>(hidden.size(1));
-    const int mask_words = static_cast<int>(vocab_mask.size(1));
-    if (M <= 0 || N <= 0) return;
-
-    const at::cuda::OptionalCUDAGuard device_guard(hidden.device());
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-
-    dim3 grid((N + kTileV - 1) / kTileV, 1, 1);
-    dim3 block(kThreadsPerBlock, 1, 1);
-    sparse_vocab_proj_tile64_kernel<true><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr()),
-        weight.data_ptr(),
-        weight_scale.data_ptr<float>(),
-        vocab_mask.data_ptr<int32_t>(),
-        reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),
-        M,
-        N,
-        K,
-        mask_words);
+    launch_sparse_vocab_proj<true>(hidden, weight, weight_scale.data_ptr<float>(), vocab_mask, out);
 }
 
 bool select_sparse_vocab_proj_cpu(

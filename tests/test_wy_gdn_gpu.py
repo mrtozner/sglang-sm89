@@ -348,6 +348,7 @@ def test_cpu_fallback_and_guard_logic() -> None:
         (1, [6], [0], [0], [0], False, True, "verify", False),
         (2, [8, 8], [19, 0], [53, 0], [0, 0], False, False, "verify", False),
         (4, [12, 12, 12, 12], [12, 48, 5, 0], [58, 40, 60, 0], [0, 0, 0, 0], True, True, "verify", False),
+        (8, [8] * 8, [8, 8, 8, 8, 8, 8, 8, 8], [0, 58, 40, 30, 20, 10, 5, 0], [0] * 8, False, False, "verify", False),
         (8, [16] * 8, [0, 10, 22, 45, 7, 15, 31, 0], [0, 50, 48, 30, 60, 52, 40, 0], [0, 0, 1, 0, 1, 0, 0, 0], True, False, "both", False),
         (2, [8, 8], [6, 4], [61, 0], [1, 0], False, False, "both", True),
     ],
@@ -409,6 +410,12 @@ def test_wy_gdn_cuda_parity(
     max_out_err = float((out_cu.float() - out_ref.float()).abs().max().item())
     tol = 0.015 if ckpt_dtype == torch.bfloat16 else 0.01
     assert max_out_err <= tol, f"out max_err={max_out_err} > {tol}"
+
+    out_ref_flat = out_ref.float().reshape(-1)
+    out_cu_flat = out_cu.float().reshape(-1)
+    if float(out_ref_flat.norm().item()) > 0.0:
+        cos_sim = float(F.cosine_similarity(out_cu_flat.unsqueeze(0), out_ref_flat.unsqueeze(0)).item())
+        assert cos_sim >= 0.9999, f"cos_sim={cos_sim} < 0.9999"
 
     if null_last:
         bos_last = int(inputs["query_start_loc"][-2].item())
@@ -547,3 +554,50 @@ def test_wy_gdn_bf16_crossover_upstream_fallback() -> None:
     wy_gdn_replayssm_verify(**inputs, out=out_fb, force_cuda=False)
     torch.cuda.synchronize()
     assert torch.isfinite(out_fb).all()
+
+
+def test_gdn_pool_bridge_cpu_hooks() -> None:
+    """Verify gdn_pool_bridge hook registration and non-ReplaySSM passthrough on CPU."""
+    from sglang_sm89.gdn_pool_bridge import (
+        around_update_mamba_state_after_mtp_verify,
+        register_hooks as register_bridge_hooks,
+    )
+
+    recorded: list[tuple[str, object, str]] = []
+
+    class _HookType:
+        AROUND = "AROUND"
+
+    class _Registry:
+        @staticmethod
+        def register(target: str, fn: object, hook_type: str) -> None:
+            recorded.append((target, fn, hook_type))
+
+    register_bridge_hooks(_Registry, _HookType)
+    assert len(recorded) == 2
+
+    passthrough_calls = []
+
+    class _PlainPool:
+        replayssm_is_kda = False
+        replayssm_spec_fold = False
+        replayssm_cache_base = None
+
+    class _ReqPool:
+        mamba_pool = _PlainPool()
+
+    class _LinearBackend:
+        req_to_token_pool = _ReqPool()
+
+    class _HybridBackend:
+        linear_attn_backend = _LinearBackend()
+
+    def _orig(backend, last_correct, track_idx, steps, model, req_pool_indices=None):
+        passthrough_calls.append((backend, req_pool_indices))
+        return "orig_ok"
+
+    res = around_update_mamba_state_after_mtp_verify(
+        _orig, _HybridBackend(), None, None, None, None
+    )
+    assert res == "orig_ok"
+    assert len(passthrough_calls) == 1

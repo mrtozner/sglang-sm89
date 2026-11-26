@@ -84,14 +84,10 @@ def around_update_mamba_state_after_mtp_verify(
     req_pool = getattr(linear_backend, "req_to_token_pool", None)
     mamba_pool = getattr(req_pool, "mamba_pool", None) if req_pool is not None else None
 
-    is_gdn_replayssm = (
-        mamba_pool is not None
-        and not getattr(mamba_pool, "replayssm_is_kda", False)
-        and (
-            getattr(mamba_pool, "replayssm_spec_fold", False)
-            or getattr(mamba_pool, "replayssm_cache_base", None) is not None
-        )
-    )
+    is_kda = bool(getattr(mamba_pool, "replayssm_is_kda", False)) if mamba_pool is not None else False
+    has_fold = bool(getattr(mamba_pool, "replayssm_spec_fold", False)) if mamba_pool is not None else False
+    has_base = (getattr(mamba_pool, "replayssm_cache_base", None) is not None) if mamba_pool is not None else False
+    is_gdn_replayssm = (mamba_pool is not None) and (not is_kda) and (has_fold or has_base)
     if not is_gdn_replayssm:
         return original_fn(
             backend,
@@ -195,13 +191,15 @@ def around_update_mamba_state_after_mtp_verify(
 
 def register_hooks(HookRegistry: Any, HookType: Any) -> None:
     """Register clean-room GDN ReplaySSM bridge hooks into SGLang HookRegistry."""
-    HookRegistry.register(
-        "sglang.srt.mem_cache.kv_cache_configurator.KVCacheConfigurator._build_hybrid_req_pool",
-        around_build_hybrid_req_pool,
-        HookType.AROUND,
+    targets = (
+        (
+            "sglang.srt.mem_cache.kv_cache_configurator.KVCacheConfigurator._build_hybrid_req_pool",
+            around_build_hybrid_req_pool,
+        ),
+        (
+            "sglang.srt.layers.attention.hybrid_linear_attn_backend.HybridLinearAttnBackend.update_mamba_state_after_mtp_verify",
+            around_update_mamba_state_after_mtp_verify,
+        ),
     )
-    HookRegistry.register(
-        "sglang.srt.layers.attention.hybrid_linear_attn_backend.HybridLinearAttnBackend.update_mamba_state_after_mtp_verify",
-        around_update_mamba_state_after_mtp_verify,
-        HookType.AROUND,
-    )
+    for target_name, hook_fn in targets:
+        HookRegistry.register(target_name, hook_fn, HookType.AROUND)

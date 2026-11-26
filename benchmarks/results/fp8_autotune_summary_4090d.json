@@ -1,14 +1,27 @@
 {
-  "device": "NVIDIA_GeForce_RTX_4090_D",
-  "block_shape": [
-    128,
-    128
-  ],
-  "dtype": "fp8_w8a8",
+  "meta": {
+    "device_name": "NVIDIA_GeForce_RTX_4090_D",
+    "sm": "8.9",
+    "dtype": "fp8_w8a8",
+    "block_shape": [
+      128,
+      128
+    ],
+    "num_shapes": 5
+  },
   "shapes": [
     {
       "file": "N=14336,K=5120,device_name=NVIDIA_GeForce_RTX_4090_D,dtype=fp8_w8a8,block_shape=[128, 128].json",
-      "buckets": [
+      "N": 14336,
+      "K": 5120,
+      "device_name": "NVIDIA_GeForce_RTX_4090_D",
+      "dtype": "fp8_w8a8",
+      "block_shape": [
+        128,
+        128
+      ],
+      "num_m_buckets": 13,
+      "m_buckets": [
         1,
         2,
         4,
@@ -23,12 +36,12 @@
         2048,
         4096
       ],
-      "schedule": {
+      "configs": {
         "1": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 4
         },
@@ -45,8 +58,8 @@
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 8,
-          "num_warps": 2,
-          "num_stages": 5
+          "num_warps": 4,
+          "num_stages": 4
         },
         "8": {
           "BLOCK_SIZE_M": 16,
@@ -70,21 +83,21 @@
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 1,
           "num_warps": 4,
-          "num_stages": 5
+          "num_stages": 4
         },
         "64": {
           "BLOCK_SIZE_M": 64,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 4
         },
         "128": {
-          "BLOCK_SIZE_M": 64,
-          "BLOCK_SIZE_N": 128,
+          "BLOCK_SIZE_M": 128,
+          "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 16,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 3
         },
@@ -114,11 +127,11 @@
         },
         "2048": {
           "BLOCK_SIZE_M": 64,
-          "BLOCK_SIZE_N": 128,
+          "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 16,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
-          "num_stages": 3
+          "num_stages": 2
         },
         "4096": {
           "BLOCK_SIZE_M": 64,
@@ -132,7 +145,16 @@
     },
     {
       "file": "N=16384,K=5120,device_name=NVIDIA_GeForce_RTX_4090_D,dtype=fp8_w8a8,block_shape=[128, 128].json",
-      "buckets": [
+      "N": 16384,
+      "K": 5120,
+      "device_name": "NVIDIA_GeForce_RTX_4090_D",
+      "dtype": "fp8_w8a8",
+      "block_shape": [
+        128,
+        128
+      ],
+      "num_m_buckets": 13,
+      "m_buckets": [
         1,
         2,
         4,
@@ -147,7 +169,7 @@
         2048,
         4096
       ],
-      "schedule": {
+      "configs": {
         "1": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
@@ -160,7 +182,7 @@
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -192,7 +214,7 @@
           "BLOCK_SIZE_M": 32,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -200,7 +222,7 @@
           "BLOCK_SIZE_M": 64,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -209,14 +231,14 @@
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 16,
-          "num_warps": 4,
+          "num_warps": 8,
           "num_stages": 4
         },
         "256": {
           "BLOCK_SIZE_M": 64,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 16,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 3
         },
@@ -230,11 +252,11 @@
         },
         "1024": {
           "BLOCK_SIZE_M": 64,
-          "BLOCK_SIZE_N": 128,
+          "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 8,
           "num_warps": 4,
-          "num_stages": 3
+          "num_stages": 2
         },
         "2048": {
           "BLOCK_SIZE_M": 64,
@@ -256,7 +278,16 @@
     },
     {
       "file": "N=34816,K=5120,device_name=NVIDIA_GeForce_RTX_4090_D,dtype=fp8_w8a8,block_shape=[128, 128].json",
-      "buckets": [
+      "N": 34816,
+      "K": 5120,
+      "device_name": "NVIDIA_GeForce_RTX_4090_D",
+      "dtype": "fp8_w8a8",
+      "block_shape": [
+        128,
+        128
+      ],
+      "num_m_buckets": 13,
+      "m_buckets": [
         1,
         2,
         4,
@@ -271,12 +302,12 @@
         2048,
         4096
       ],
-      "schedule": {
+      "configs": {
         "1": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 2,
           "num_stages": 5
         },
@@ -284,7 +315,7 @@
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 8,
+          "GROUP_SIZE_M": 1,
           "num_warps": 2,
           "num_stages": 5
         },
@@ -298,17 +329,17 @@
         },
         "8": {
           "BLOCK_SIZE_M": 16,
-          "BLOCK_SIZE_N": 64,
+          "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 8,
-          "num_warps": 2,
+          "num_warps": 4,
           "num_stages": 5
         },
         "16": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 16,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 2,
           "num_stages": 4
         },
@@ -380,7 +411,16 @@
     },
     {
       "file": "N=5120,K=17408,device_name=NVIDIA_GeForce_RTX_4090_D,dtype=fp8_w8a8,block_shape=[128, 128].json",
-      "buckets": [
+      "N": 5120,
+      "K": 17408,
+      "device_name": "NVIDIA_GeForce_RTX_4090_D",
+      "dtype": "fp8_w8a8",
+      "block_shape": [
+        128,
+        128
+      ],
+      "num_m_buckets": 13,
+      "m_buckets": [
         1,
         2,
         4,
@@ -395,12 +435,12 @@
         2048,
         4096
       ],
-      "schedule": {
+      "configs": {
         "1": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 8,
+          "GROUP_SIZE_M": 1,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -408,7 +448,7 @@
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -416,7 +456,7 @@
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -424,7 +464,7 @@
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 32,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 5
         },
@@ -445,18 +485,18 @@
           "num_stages": 5
         },
         "64": {
-          "BLOCK_SIZE_M": 32,
-          "BLOCK_SIZE_N": 32,
+          "BLOCK_SIZE_M": 16,
+          "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 1,
           "num_warps": 4,
-          "num_stages": 5
+          "num_stages": 4
         },
         "128": {
           "BLOCK_SIZE_M": 64,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 8,
+          "GROUP_SIZE_M": 16,
           "num_warps": 4,
           "num_stages": 4
         },
@@ -464,7 +504,7 @@
           "BLOCK_SIZE_M": 64,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 16,
+          "GROUP_SIZE_M": 8,
           "num_warps": 4,
           "num_stages": 3
         },
@@ -504,7 +544,16 @@
     },
     {
       "file": "N=5120,K=6144,device_name=NVIDIA_GeForce_RTX_4090_D,dtype=fp8_w8a8,block_shape=[128, 128].json",
-      "buckets": [
+      "N": 5120,
+      "K": 6144,
+      "device_name": "NVIDIA_GeForce_RTX_4090_D",
+      "dtype": "fp8_w8a8",
+      "block_shape": [
+        128,
+        128
+      ],
+      "num_m_buckets": 13,
+      "m_buckets": [
         1,
         2,
         4,
@@ -519,21 +568,21 @@
         2048,
         4096
       ],
-      "schedule": {
+      "configs": {
         "1": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 1,
           "num_warps": 2,
-          "num_stages": 5
+          "num_stages": 4
         },
         "2": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 1,
-          "num_warps": 4,
+          "GROUP_SIZE_M": 8,
+          "num_warps": 2,
           "num_stages": 4
         },
         "4": {
@@ -541,14 +590,14 @@
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 8,
-          "num_warps": 4,
+          "num_warps": 2,
           "num_stages": 5
         },
         "8": {
           "BLOCK_SIZE_M": 16,
           "BLOCK_SIZE_N": 16,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 8,
+          "GROUP_SIZE_M": 1,
           "num_warps": 2,
           "num_stages": 5
         },
@@ -557,7 +606,7 @@
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 1,
-          "num_warps": 2,
+          "num_warps": 4,
           "num_stages": 5
         },
         "32": {
@@ -572,9 +621,9 @@
           "BLOCK_SIZE_M": 32,
           "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
-          "GROUP_SIZE_M": 8,
+          "GROUP_SIZE_M": 1,
           "num_warps": 4,
-          "num_stages": 4
+          "num_stages": 5
         },
         "128": {
           "BLOCK_SIZE_M": 64,
@@ -610,7 +659,7 @@
         },
         "2048": {
           "BLOCK_SIZE_M": 64,
-          "BLOCK_SIZE_N": 128,
+          "BLOCK_SIZE_N": 64,
           "BLOCK_SIZE_K": 128,
           "GROUP_SIZE_M": 8,
           "num_warps": 4,

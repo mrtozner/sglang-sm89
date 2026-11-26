@@ -18,16 +18,18 @@ def _make_sparse_or_mixed_mask(
     m: int, n: int, density: float, *, device: torch.device, poison_tail: bool = False
 ) -> torch.Tensor:
     words = (n + 31) // 32
-    mask = torch.zeros((m, words), dtype=torch.int32, device="cpu")
-    k_active = max(1, int(round(n * density)))
-    torch.manual_seed(9100 + m)
-    if k_active >= n:
-        mask.fill_(-1)
+    k_active = min(n, max(1, int(round(n * density))))
+    gen = torch.Generator(device="cpu").manual_seed(9100 + m)
+    if k_active == n:
+        mask = torch.full((m, words), -1, dtype=torch.int32)
     else:
-        for row_m in range(m):
-            idx = torch.randperm(n)[:k_active]
-            for v in idx.tolist():
-                mask[row_m, v >> 5] |= 1 << (v & 31)
+        mask = torch.zeros((m, words), dtype=torch.int32)
+        for row_idx in range(m):
+            cols = torch.randperm(n, generator=gen)[:k_active]
+            w_idx = cols >> 5
+            bits = (1 << (cols & 31)).to(torch.int32)
+            for c_pos in range(k_active):
+                mask[row_idx, int(w_idx[c_pos])] |= int(bits[c_pos])
     if poison_tail and (n & 31) != 0:
         mask[:, -1] |= -1 << (n & 31)
     return mask.to(device)

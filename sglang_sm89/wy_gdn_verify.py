@@ -237,6 +237,15 @@ def wy_gdn_replayssm_verify(
     """Accelerated sm_89 CUDA ReplaySSM verify with automatic upstream fallback."""
     upstream_fn = None if fallback_fn is not None else _resolve_upstream_gdn_replayssm()[1]
     has_fallback = (fallback_fn is not None) or (upstream_fn is not None)
+    tensor_pack: dict[str, Any] = {
+        "q": q, "k": k, "v": v, "a": a, "b": b,
+        "A_log": A_log, "dt_bias": dt_bias, "checkpoint_state": checkpoint_state,
+        "d_cache": d_cache, "k_cache": k_cache, "g_cache": g_cache,
+        "rawv_cache": rawv_cache, "rawk_cache": rawk_cache, "beta_cache": beta_cache,
+        "query_start_loc": query_start_loc, "ssm_state_indices": ssm_state_indices,
+        "replay_indices": replay_indices, "write_pos": write_pos,
+        "cache_base": cache_base, "is_flush": is_flush, "out": out,
+    }
     if (
         query_start_loc is None
         or ssm_state_indices is None
@@ -245,27 +254,7 @@ def wy_gdn_replayssm_verify(
         or cache_base is None
         or is_flush is None
         or not _can_use_wy_gdn_fast_path(
-            q=q,
-            k=k,
-            v=v,
-            a=a,
-            b=b,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            checkpoint_state=checkpoint_state,
-            d_cache=d_cache,
-            k_cache=k_cache,
-            g_cache=g_cache,
-            rawv_cache=rawv_cache,
-            rawk_cache=rawk_cache,
-            beta_cache=beta_cache,
-            query_start_loc=query_start_loc,
-            ssm_state_indices=ssm_state_indices,
-            replay_indices=replay_indices,
-            write_pos=write_pos,
-            cache_base=cache_base,
-            is_flush=is_flush,
-            out=out,
+            **tensor_pack,
             max_cache_len=int(max_cache_len),
             max_spec_len=int(max_spec_len),
             launch_mode=str(launch_mode),
@@ -278,36 +267,16 @@ def wy_gdn_replayssm_verify(
         if fallback_fn is not None:
             return fallback_fn()
         if upstream_fn is not None:
-            upstream_kwargs: dict[str, Any] = dict(
-                q=q,
-                k=k,
-                v=v,
-                a=a,
-                b=b,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                checkpoint_state=checkpoint_state,
-                d_cache=d_cache,
-                k_cache=k_cache,
-                g_cache=g_cache,
-                rawv_cache=rawv_cache,
-                rawk_cache=rawk_cache,
-                beta_cache=beta_cache,
-                query_start_loc=query_start_loc,
-                ssm_state_indices=ssm_state_indices,
-                replay_indices=replay_indices,
-                write_pos=write_pos,
-                cache_base=cache_base,
-                is_flush=is_flush,
-                out=out,
-                scale=scale,
-                max_cache_len=max_cache_len,
-                max_spec_len=max_spec_len,
-                launch_mode=launch_mode,
-                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-                null_block_id=null_block_id,
+            upstream_kwargs: dict[str, Any] = {
+                **tensor_pack,
+                "scale": scale,
+                "max_cache_len": max_cache_len,
+                "max_spec_len": max_spec_len,
+                "launch_mode": launch_mode,
+                "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
+                "null_block_id": null_block_id,
                 **extra_kwargs,
-            )
+            }
             sig = _SIG_CACHE.get(upstream_fn)
             if sig is None:
                 try:
@@ -331,90 +300,35 @@ def wy_gdn_replayssm_verify(
 
     eff_scale = float(scale) if scale is not None else (float(q.shape[-1]) ** -0.5)
     eff_max_cache = int(max_cache_len)
-    eff_max_spec = int(max_spec_len)
+    eff_max_spec = min(int(max_spec_len), max(1, int(q.shape[0])))
     eff_sp_thresh = float(softplus_threshold)
     store_exact_raw = (
         rawv_cache is not None and rawk_cache is not None and beta_cache is not None
     )
 
     if launch_mode in ("both", "flush"):
-        torch.ops.sglang_sm89.wy_gdn_replayssm_flush_fold(
-            checkpoint_state,
-            d_cache,
-            k_cache,
-            g_cache,
-            rawv_cache,
-            rawk_cache,
-            ssm_state_indices,
-            replay_indices,
-            write_pos,
-            cache_base,
-            is_flush,
-            eff_max_cache,
-            bool(store_exact_raw),
+        fold_args = (
+            checkpoint_state, d_cache, k_cache, g_cache,
+            rawv_cache, rawk_cache,
+            ssm_state_indices, replay_indices, write_pos, cache_base, is_flush,
+            eff_max_cache, bool(store_exact_raw),
             beta_cache if store_exact_raw else None,
         )
+        torch.ops.sglang_sm89.wy_gdn_replayssm_flush_fold(*fold_args)
 
+    verify_args = (
+        q, k, v, a, b, A_log, dt_bias, checkpoint_state,
+        d_cache, k_cache, g_cache, rawv_cache, rawk_cache, beta_cache,
+        query_start_loc, ssm_state_indices, replay_indices,
+        write_pos, cache_base, is_flush, out,
+        eff_scale, eff_max_cache, eff_max_spec,
+    )
     if launch_mode in ("both", "verify"):
         # Single kernel launch on launch_mode="verify" (matches SGLang GDNAttnBackend contract)
-        torch.ops.sglang_sm89.wy_gdn_replayssm_verify(
-            q,
-            k,
-            v,
-            a,
-            b,
-            A_log,
-            dt_bias,
-            checkpoint_state,
-            d_cache,
-            k_cache,
-            g_cache,
-            rawv_cache,
-            rawk_cache,
-            beta_cache,
-            query_start_loc,
-            ssm_state_indices,
-            replay_indices,
-            write_pos,
-            cache_base,
-            is_flush,
-            out,
-            eff_scale,
-            eff_max_cache,
-            eff_max_spec,
-            False,
-            eff_sp_thresh,
-        )
+        torch.ops.sglang_sm89.wy_gdn_replayssm_verify(*verify_args, False, eff_sp_thresh)
 
     if launch_mode in ("both", "flush"):
-        torch.ops.sglang_sm89.wy_gdn_replayssm_verify(
-            q,
-            k,
-            v,
-            a,
-            b,
-            A_log,
-            dt_bias,
-            checkpoint_state,
-            d_cache,
-            k_cache,
-            g_cache,
-            rawv_cache,
-            rawk_cache,
-            beta_cache,
-            query_start_loc,
-            ssm_state_indices,
-            replay_indices,
-            write_pos,
-            cache_base,
-            is_flush,
-            out,
-            eff_scale,
-            eff_max_cache,
-            eff_max_spec,
-            True,
-            eff_sp_thresh,
-        )
+        torch.ops.sglang_sm89.wy_gdn_replayssm_verify(*verify_args, True, eff_sp_thresh)
     return out
 
 
