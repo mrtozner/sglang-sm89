@@ -157,7 +157,7 @@ def test_get_logits_deferral_state_machine_graph_prefill_replay(monkeypatch: pyt
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_cap_fn, model_runner)
-    assert getattr(lp, "_sm89_verify_armed", False) is True
+    assert getattr(lp, "_sm89_graph_verify_captured", False) is True
 
     # Step 2: Interleaved eager prefill (not verify) runs original_fn and must NOT disarm verify
     h_prefill = torch.randn((2, 8), dtype=torch.bfloat16)
@@ -168,7 +168,7 @@ def test_get_logits_deferral_state_machine_graph_prefill_replay(monkeypatch: pyt
     )
     out_p = around_target_get_logits(_orig_get_logits, lp, h_prefill, lm_head, meta_prefill)
     assert torch.allclose(out_p, h_prefill @ weight.T)
-    assert getattr(lp, "_sm89_verify_armed", False) is True
+    assert getattr(lp, "_sm89_graph_verify_captured", False) is True
 
     # Step 3: Verify CUDA Graph replay executes without re-running _get_logits Python
     tp_w = SimpleNamespace(model_runner=model_runner)
@@ -242,8 +242,9 @@ def test_codex_p1_direct_target_verify_outside_dflash_computes_logits() -> None:
 
     assert torch.equal(out[:, :2], torch.tensor([[2.0, 3.0], [2.0, 3.0]], dtype=torch.bfloat16))
     assert not torch.equal(out[:, :2], torch.full((2, 2), 123.0, dtype=torch.bfloat16))
-    assert not hasattr(lp, "_sm89_verify_armed")
+    assert not hasattr(lp, "_sm89_graph_verify_captured")
     assert not hasattr(lp, "_sm89_eager_verify_bypassed")
+    assert getattr(lp, "_sm89_step_eager_hidden", None) is None
     assert _VERIFY_TLS.pending is None
 
 
@@ -281,8 +282,8 @@ def test_codex_p1_eagle_capture_and_runtime_target_verify_computes_logits(
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_eagle_capture, eagle_runner)
-    assert not hasattr(lp, "_sm89_verify_hidden_arena")
-    assert not hasattr(lp, "_sm89_verify_armed")
+    assert not hasattr(lp, "_sm89_graph_hidden_arena")
+    assert not hasattr(lp, "_sm89_graph_verify_captured")
 
     def _eagle_forward(_tp, **_kw):
         out_run = around_target_get_logits(orig_fn, lp, hidden, lm_head, meta)
@@ -334,8 +335,8 @@ def test_codex_p1_dflash_draft_worker_is_verify_computes_logits(
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_draft_capture, draft_runner)
-    assert not hasattr(draft_lp, "_sm89_verify_hidden_arena")
-    assert not hasattr(draft_lp, "_sm89_verify_armed")
+    assert not hasattr(draft_lp, "_sm89_graph_hidden_arena")
+    assert not hasattr(draft_lp, "_sm89_graph_verify_captured")
 
     target_tp = SimpleNamespace(
         model_runner=SimpleNamespace(model=target_model)
@@ -355,7 +356,7 @@ def test_codex_p1_dflash_draft_worker_is_verify_computes_logits(
             torch.tensor([[2.0, 3.0], [2.0, 3.0]], dtype=torch.bfloat16),
         )
         assert torch.equal(ext_buf[:, :2], torch.full((4, 2), 123.0, dtype=torch.bfloat16))
-        assert not hasattr(draft_lp, "_sm89_verify_armed")
+        assert not hasattr(draft_lp, "_sm89_graph_verify_captured")
         assert _VERIFY_TLS.pending is None
     finally:
         _STEP_TLS.stack.pop()
@@ -408,9 +409,9 @@ def test_valid_dflash_capture_and_verify_eager_and_graph_dense_and_sparse(
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_valid_capture, model_runner)
-    assert lp._sm89_verify_hidden_arena.shape[0] >= 64
-    assert lp._sm89_verify_logits_arena.shape[0] >= 64
-    assert lp._sm89_verify_armed is True
+    assert lp._sm89_graph_hidden_arena.shape[0] >= 64
+    assert lp._sm89_graph_logits_arena.shape[0] >= 64
+    assert lp._sm89_graph_verify_captured is True
     assert _VERIFY_TLS.capturing_dflash_lp is None
 
     # 2. CUDA Graph replay + Dense materialization -> [2, 3].
@@ -419,7 +420,7 @@ def test_valid_dflash_capture_and_verify_eager_and_graph_dense_and_sparse(
         ext_buf.fill_(123.0)
 
         def _graph_replay(_tp, **_kw):
-            lp._sm89_verify_hidden_arena[:2].copy_(hidden)
+            lp._sm89_graph_hidden_arena[:2].copy_(hidden)
             return SimpleNamespace(logits_output=SimpleNamespace(next_token_logits=ext_buf[:2]))
 
         around_tp_worker_forward_batch_generation(_graph_replay, target_tp, is_verify=True)
@@ -658,8 +659,8 @@ def test_codex_p1_dspark_capture_and_replay_computes_logits(
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_dspark_capture, dspark_runner)
-    assert getattr(lp, "_sm89_verify_armed", False) is False
-    assert not hasattr(lp, "_sm89_verify_hidden_arena")
+    assert getattr(lp, "_sm89_graph_verify_captured", False) is False
+    assert not hasattr(lp, "_sm89_graph_hidden_arena")
 
     def _dspark_replay_fwd(_tp, **_kw):
         out_run = around_target_get_logits(orig_fn, lp, hidden, lm_head, meta)
@@ -671,7 +672,7 @@ def test_codex_p1_dspark_capture_and_replay_computes_logits(
         torch.tensor([[2.0, 3.0], [2.0, 3.0]], dtype=torch.bfloat16),
     )
     assert torch.equal(ext_buf[:, :2], torch.full((4, 2), 123.0, dtype=torch.bfloat16))
-    assert getattr(lp, "_sm89_verify_armed", False) is False
+    assert getattr(lp, "_sm89_graph_verify_captured", False) is False
     assert _VERIFY_TLS.pending is None
 
 
@@ -745,16 +746,16 @@ def test_codex_p2_large_capture_batch_bs24_draft8_192_rows(
 
     around_capture_decode_graph(_capture_192, runner_a)
     assert seen_widths == [8]
-    assert lp._sm89_verify_hidden_arena.shape[0] >= 192
-    assert lp._sm89_verify_logits_arena.shape[0] >= 192
-    assert lp._sm89_verify_armed is True
+    assert lp._sm89_graph_hidden_arena.shape[0] >= 192
+    assert lp._sm89_graph_logits_arena.shape[0] >= 192
+    assert lp._sm89_graph_verify_captured is True
 
     tp_a = SimpleNamespace(model_runner=runner_a)
     dflash_a = SimpleNamespace(_target_worker=tp_a, _target_logits_processor=lp)
     _STEP_TLS.stack.append((dflash_a, SimpleNamespace(), None))
     try:
         def _replay_192(_tp, **_kw):
-            lp._sm89_verify_hidden_arena[:192].copy_(h192)
+            lp._sm89_graph_hidden_arena[:192].copy_(h192)
             return SimpleNamespace(
                 logits_output=SimpleNamespace(next_token_logits=captured_logits_slots[0])
             )
@@ -799,15 +800,15 @@ def test_codex_p2_large_capture_batch_bs24_draft8_192_rows(
             monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
 
     around_capture_decode_graph(_capture_192_b, runner_b)
-    assert lp_b._sm89_verify_hidden_arena.shape[0] >= 192
-    assert lp_b._sm89_verify_logits_arena.shape[0] >= 192
+    assert lp_b._sm89_graph_hidden_arena.shape[0] >= 192
+    assert lp_b._sm89_graph_logits_arena.shape[0] >= 192
 
     tp_b = SimpleNamespace(model_runner=runner_b)
     dflash_b = SimpleNamespace(_target_worker=tp_b, _target_logits_processor=lp_b)
     _STEP_TLS.stack.append((dflash_b, SimpleNamespace(), None))
     try:
         def _replay_192_b(_tp, **_kw):
-            lp_b._sm89_verify_hidden_arena[:192].copy_(h192)
+            lp_b._sm89_graph_hidden_arena[:192].copy_(h192)
             return SimpleNamespace(
                 logits_output=SimpleNamespace(next_token_logits=slots_b[0])
             )
@@ -818,3 +819,177 @@ def test_codex_p2_large_capture_batch_bs24_draft8_192_rows(
     finally:
         _STEP_TLS.stack.pop()
         clear_target_verify_tls()
+
+
+def test_codex_p1_graph16_then_eager24_then_graph16_preserves_captured_arena(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph 16 -> Eager 24 -> Graph 16 (and Eager 4 -> Graph 16) preserves captured arena pointer."""
+    import sys
+    import types
+    import sglang_sm89.vocab_projection as vp
+    from sglang_sm89.coupled_grammar import _STEP_TLS
+    from sglang_sm89.vocab_projection import (
+        _VERIFY_TLS,
+        around_build_grammar_vocab_mask,
+        around_capture_decode_graph,
+        around_target_get_logits,
+        around_tp_worker_forward_batch_generation,
+        clear_target_verify_tls,
+        materialize_deferred_target_logits,
+    )
+
+    clear_target_verify_tls()
+    lp, model, lm_head, weight, _h2, _ext, meta_base, orig_fn = _make_23_fixture()
+    weight.zero_()
+    weight[0, 0] = 1.0
+    weight[1, 1] = 1.0
+
+    meta_no_buf = SimpleNamespace(
+        forward_mode=meta_base.forward_mode,
+        extend_return_logprob=False,
+        next_token_logits_buffer=None,
+    )
+    runner = SimpleNamespace(
+        is_draft_worker=False,
+        spec_algorithm=SimpleNamespace(is_dflash=lambda: True, name="DFLASH"),
+        model=model,
+        model_config=SimpleNamespace(vocab_size=64, hidden_size=8),
+        server_args=SimpleNamespace(cuda_graph_max_bs_decode=16, speculative_num_draft_tokens=8),
+        decode_num_tokens_per_req=lambda: 8,
+    )
+    tp_w = SimpleNamespace(model_runner=runner)
+    dflash_w = SimpleNamespace(_target_worker=tp_w, _target_logits_processor=lp)
+
+    def _make_h(rows: int, a: float, b: float) -> torch.Tensor:
+        h = torch.zeros((rows, 8), dtype=torch.bfloat16)
+        h[:, 0] = a
+        h[:, 1] = b
+        return h
+
+    # Warmup (non-capturing) + CUDA Graph capture for bs=16 (128 rows).
+    h_warm = _make_h(128, 5.0, 7.0)
+    h_cap_init = _make_h(128, 0.0, 0.0)
+    captured_logits_slots: list[torch.Tensor] = []
+
+    def _capture_16(_mr):
+        around_target_get_logits(orig_fn, lp, h_warm, lm_head, meta_no_buf, use_logits_buffer=False)
+        assert getattr(lp, "_sm89_graph_verify_captured", False) is False
+        monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: True)
+        try:
+            slot = around_target_get_logits(
+                orig_fn, lp, h_cap_init, lm_head, meta_no_buf, use_logits_buffer=False
+            )
+            slot.fill_(123.0)
+            captured_logits_slots.append(slot)
+        finally:
+            monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
+
+    around_capture_decode_graph(_capture_16, runner)
+    assert lp._sm89_graph_verify_captured is True
+    captured_hidden_obj = lp._sm89_graph_hidden_arena
+    captured_hidden_ptr = captured_hidden_obj.data_ptr()
+    assert captured_hidden_obj.shape[0] == 128
+
+    # Setup sparse mock helper for step-3 verification.
+    mask_128 = torch.zeros((128, 2), dtype=torch.int32)
+    mask_128[:, 0] = 0b11
+    spec_pkg = types.ModuleType("sglang.srt.speculative")
+    spec_utils_mod = types.ModuleType("sglang.srt.speculative.spec_utils")
+    spec_utils_mod.generate_token_bitmask = lambda _reqs, _t0, _t1, _v: (mask_128, "stub_g")
+    spec_utils_mod.GrammarMask = lambda g, m: SimpleNamespace(grammar=g, mask=m)
+    monkeypatch.setitem(sys.modules, "sglang", types.ModuleType("sglang"))
+    monkeypatch.setitem(sys.modules, "sglang.srt", types.ModuleType("sglang.srt"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.speculative", spec_pkg)
+    monkeypatch.setitem(sys.modules, "sglang.srt.speculative.spec_utils", spec_utils_mod)
+
+    sparse_calls: list[int] = []
+    monkeypatch.setattr(vp, "ensure_extension_loaded", lambda: True)
+    monkeypatch.setattr(vp, "select_sparse_vocab_proj", lambda *_a, **_k: True)
+
+    def _mock_sparse_bf16(h, w, m, out=None):
+        sparse_calls.append(int(h.shape[0]))
+        torch.mm(h, w.T, out=out)
+        active = ((m[:, 0].unsqueeze(1) >> torch.arange(64, device=m.device)) & 1).bool()
+        out.masked_fill_(~active, float("-inf"))
+        return out
+
+    monkeypatch.setattr(vp, "sparse_vocab_bf16_lm_head", _mock_sparse_bf16)
+
+    def _run_graph16_replay(use_sparse: bool) -> None:
+        h_graph = _make_h(128, 2.0, 3.0)
+        captured_logits_slots[0].fill_(123.0)
+        _STEP_TLS.stack.append((dflash_w, SimpleNamespace(), None))
+        try:
+            def _replay_fn(_tp, **_kw):
+                # Graph replay writes straight into the captured tensor pointer!
+                captured_hidden_obj[:128].copy_(h_graph)
+                return SimpleNamespace(
+                    can_run_cuda_graph=True,
+                    logits_output=SimpleNamespace(next_token_logits=captured_logits_slots[0]),
+                )
+
+            around_tp_worker_forward_batch_generation(_replay_fn, tp_w, is_verify=True)
+            if use_sparse:
+                around_build_grammar_vocab_mask(
+                    lambda *_a, **_k: None,
+                    reqs=[],
+                    tree=SimpleNamespace(resolve=lambda: (None, None)),
+                    sampling_info=SimpleNamespace(vocab_size=64, grammar_mask=None),
+                    device=torch.device("cpu"),
+                )
+            materialize_deferred_target_logits()
+            assert torch.equal(
+                captured_logits_slots[0][:, :2],
+                torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16).expand(128, 2),
+            )
+            if use_sparse:
+                assert torch.all(torch.isneginf(captured_logits_slots[0][:, 2:]))
+        finally:
+            _STEP_TLS.stack.pop()
+            clear_target_verify_tls()
+
+    def _run_eager(rows: int, a: float, b: float) -> None:
+        h_e = _make_h(rows, a, b)
+        _STEP_TLS.stack.append((dflash_w, SimpleNamespace(), None))
+        try:
+            out_holder: list[torch.Tensor] = []
+
+            def _eager_fn(_tp, **_kw):
+                slot = around_target_get_logits(
+                    orig_fn, lp, h_e, lm_head, meta_no_buf, use_logits_buffer=False
+                )
+                slot.fill_(123.0)
+                out_holder.append(slot)
+                return SimpleNamespace(
+                    can_run_cuda_graph=False,
+                    logits_output=SimpleNamespace(next_token_logits=slot),
+                )
+
+            around_tp_worker_forward_batch_generation(_eager_fn, tp_w, is_verify=True)
+            assert getattr(lp, "_sm89_step_eager_hidden", None) is None
+            assert _VERIFY_TLS.pending is not None
+            materialize_deferred_target_logits()
+            assert torch.equal(
+                out_holder[0][:, :2],
+                torch.tensor([[a, b]], dtype=torch.bfloat16).expand(rows, 2),
+            )
+        finally:
+            _STEP_TLS.stack.pop()
+            clear_target_verify_tls()
+
+    # Sequence: Graph 16 -> Eager 24 (192 rows, [9, 11]) -> Graph 16 (dense & sparse -> [2, 3])
+    _run_graph16_replay(use_sparse=False)
+    _run_eager(192, 9.0, 11.0)
+    assert lp._sm89_eager_hidden_arena.shape[0] >= 192
+    assert lp._sm89_graph_hidden_arena is captured_hidden_obj
+    assert lp._sm89_graph_hidden_arena.data_ptr() == captured_hidden_ptr
+    _run_graph16_replay(use_sparse=False)
+    _run_graph16_replay(use_sparse=True)
+    assert sparse_calls == [128]
+    assert lp._sm89_graph_hidden_arena.data_ptr() == captured_hidden_ptr
+
+    # Sequence: Eager 4 (32 rows, [5, 7]) -> Graph 16 ([2, 3])
+    _run_eager(32, 5.0, 7.0)
+    _run_graph16_replay(use_sparse=False)
+    assert lp._sm89_graph_hidden_arena.data_ptr() == captured_hidden_ptr

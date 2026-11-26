@@ -194,6 +194,8 @@ def _borrow_arena_slice(
     rows: int,
     cols: int,
     device: torch.device,
+    *,
+    forbid_resize: bool = False,
 ) -> torch.Tensor:
     arena = getattr(lp_self, attr, None)
     if (
@@ -202,7 +204,7 @@ def _borrow_arena_slice(
         or arena.shape[1] != cols
         or arena.device != device
     ):
-        if _is_cuda_capturing(device):
+        if forbid_resize or _is_cuda_capturing(device):
             raise RuntimeError(f"Missing pre-allocated scratch arena {attr} during CUDA graph capture")
         arena = torch.empty((max(rows, 64), cols), dtype=torch.bfloat16, device=device)
         setattr(lp_self, attr, arena)
@@ -306,6 +308,7 @@ def _resolve_dflash_capture_arena_rows(
 
         exec_bs: Optional[int] = None
         for mod_name in (
+            "sglang.srt.runtime_context",
             "sglang.srt.configs.exec_config",
             "sglang.srt.execution.config",
             "sglang.srt.server_args",
@@ -390,9 +393,10 @@ def around_capture_decode_graph(original_fn, *args, **kwargs):
     )
     arena_rows = _resolve_dflash_capture_arena_rows(model_runner, kwargs)
     if hidden_dim > 0 and n_vocab > 0 and not _is_cuda_capturing(device):
-        _borrow_arena_slice(lp, "_sm89_verify_hidden_arena", arena_rows, hidden_dim, device)
-        _borrow_arena_slice(lp, "_sm89_verify_logits_arena", arena_rows, n_vocab, device)
+        _borrow_arena_slice(lp, "_sm89_graph_hidden_arena", arena_rows, hidden_dim, device)
+        _borrow_arena_slice(lp, "_sm89_graph_logits_arena", arena_rows, n_vocab, device)
 
+    lp._sm89_graph_verify_captured = False
     prev_capturing = getattr(_VERIFY_TLS, "capturing_dflash_lp", None)
     _VERIFY_TLS.capturing_dflash_lp = lp
     try:
@@ -411,14 +415,11 @@ def around_target_get_logits(
     use_logits_buffer: bool = True,
 ) -> torch.Tensor:
     """Defer DFlash TARGET_VERIFY projection inside LogitsProcessor._get_logits until mask builds."""
-    in_dflash_capture = (
-        _is_cuda_capturing(hidden_states.device)
-        and getattr(_VERIFY_TLS, "capturing_dflash_lp", None) is lp_self
-    )
+    in_capture_context = getattr(_VERIFY_TLS, "capturing_dflash_lp", None) is lp_self
     in_dflash_step = getattr(_VERIFY_TLS, "active_dflash_lp", None) is lp_self
     fmode = getattr(logits_metadata, "forward_mode", None)
     if (
-        not (in_dflash_capture or in_dflash_step)
+        not (in_capture_context or in_dflash_step)
         or fmode is None
         or not fmode.is_target_verify()
     ):
@@ -458,8 +459,15 @@ def around_target_get_logits(
     rows, hidden_dim = int(hidden_states.shape[0]), int(hidden_states.shape[1])
     n_vocab = int(weight.shape[0])
     device = hidden_states.device
+    capturing = _is_cuda_capturing(device)
 
-    hidden_slot = _borrow_arena_slice(lp_self, "_sm89_verify_hidden_arena", rows, hidden_dim, device)
+    hidden_attr = "_sm89_graph_hidden_arena" if in_capture_context else "_sm89_eager_hidden_arena"
+    logits_attr = "_sm89_graph_logits_arena" if in_capture_context else "_sm89_eager_logits_arena"
+    forbid_resize = capturing if in_capture_context else False
+
+    hidden_slot = _borrow_arena_slice(
+        lp_self, hidden_attr, rows, hidden_dim, device, forbid_resize=forbid_resize
+    )
     ext_buf = (
         getattr(logits_metadata, "next_token_logits_buffer", None)
         if use_logits_buffer
@@ -474,15 +482,22 @@ def around_target_get_logits(
     ):
         logits_slot = ext_buf[:rows]
     else:
-        logits_slot = _borrow_arena_slice(lp_self, "_sm89_verify_logits_arena", rows, n_vocab, device)
+        logits_slot = _borrow_arena_slice(
+            lp_self, logits_attr, rows, n_vocab, device, forbid_resize=forbid_resize
+        )
 
     if os.getenv("SGLANG_SM89_FP8_VERIFY_HEAD", "0").strip() == "1":
-        if not _is_cuda_capturing(device):
+        if not capturing:
             _get_fp8_verify_bundle(lp_self, weight)
 
     hidden_slot.copy_(hidden_states)
-    lp_self._sm89_verify_armed = True
-    lp_self._sm89_eager_verify_bypassed = False
+    if in_capture_context:
+        lp_self._sm89_graph_verify_captured = bool(capturing) or bool(
+            getattr(lp_self, "_sm89_graph_verify_captured", False)
+        )
+    else:
+        lp_self._sm89_step_eager_hidden = hidden_slot
+        lp_self._sm89_eager_verify_bypassed = False
     return logits_slot
 
 
@@ -499,22 +514,42 @@ def around_tp_worker_forward_batch_generation(original_fn, tp_worker, *args, **k
     if tp_worker is not target_worker or active_lp is None:
         return original_fn(tp_worker, *args, **kwargs)
 
+    active_lp._sm89_step_eager_hidden = None
+    active_lp._sm89_eager_verify_bypassed = False
     prev_active = getattr(_VERIFY_TLS, "active_dflash_lp", None)
     _VERIFY_TLS.active_dflash_lp = active_lp
     try:
         res = original_fn(tp_worker, *args, **kwargs)
+    except BaseException:
+        active_lp._sm89_step_eager_hidden = None
+        active_lp._sm89_eager_verify_bypassed = False
+        raise
     finally:
         _VERIFY_TLS.active_dflash_lp = prev_active
 
+    eager_hidden = getattr(active_lp, "_sm89_step_eager_hidden", None)
     bypassed = bool(getattr(active_lp, "_sm89_eager_verify_bypassed", False))
+    active_lp._sm89_step_eager_hidden = None
     active_lp._sm89_eager_verify_bypassed = False
-    if not getattr(active_lp, "_sm89_verify_armed", False) or bypassed:
+    if bypassed:
+        return res
+
+    if eager_hidden is not None:
+        source_hidden = eager_hidden
+    elif (
+        getattr(active_lp, "_sm89_graph_verify_captured", False)
+        and getattr(res, "can_run_cuda_graph", getattr(res, "can_run_graph", True)) is not False
+    ):
+        source_hidden = getattr(active_lp, "_sm89_graph_hidden_arena", None)
+    else:
         return res
 
     logits_output = getattr(res, "logits_output", None)
-    hidden_arena = getattr(active_lp, "_sm89_verify_hidden_arena", None)
     out_tensor = getattr(logits_output, "next_token_logits", None)
-    if hidden_arena is None or out_tensor is None:
+    if source_hidden is None or out_tensor is None:
+        return res
+    m_rows = int(out_tensor.shape[0])
+    if int(source_hidden.shape[0]) < m_rows:
         return res
 
     lm_head = getattr(tp_worker.model_runner.model, "lm_head", None)
@@ -522,10 +557,9 @@ def around_tp_worker_forward_batch_generation(original_fn, tp_worker, *args, **k
     if weight is None:
         return res
 
-    m_rows = int(out_tensor.shape[0])
     _VERIFY_TLS.pending = {
         "lp": active_lp,
-        "hidden": hidden_arena[:m_rows],
+        "hidden": source_hidden[:m_rows],
         "weight": weight,
         "out": out_tensor,
         "vocab_mask_gpu": None,

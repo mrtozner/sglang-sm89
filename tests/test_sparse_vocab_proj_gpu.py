@@ -132,6 +132,148 @@ def test_sparse_vocab_proj_cudagraph_m64() -> None:
     assert cg_diff <= 0.05, f"CUDAGraph M=64 max_diff={cg_diff}"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_real_cudagraph_bs16_eager24_replay16_arena_isolation() -> None:
+    """Real CUDA Graph bs=16 (128 rows) -> Eager 24 (192 rows) -> Graph replay keeps captured ptr."""
+    from types import SimpleNamespace
+    from sglang_sm89.coupled_grammar import _STEP_TLS
+    from sglang_sm89.vocab_projection import (
+        _VERIFY_TLS,
+        around_capture_decode_graph,
+        around_target_get_logits,
+        around_tp_worker_forward_batch_generation,
+        clear_target_verify_tls,
+        materialize_deferred_target_logits,
+    )
+
+    class _Mode:
+        def is_target_verify(self) -> bool:
+            return True
+
+    class LogitsProcessor(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.use_fp32_lm_head = False
+            self.use_fp32_lm_head_output = False
+            self.final_logit_softcapping = None
+            self.logit_scale = None
+            self.do_tensor_parallel_all_gather = False
+            self.tp_size = 1
+
+    device = torch.device("cuda")
+    n_vocab, hidden_dim = 256, 64
+    weight = torch.zeros((n_vocab, hidden_dim), dtype=torch.bfloat16, device=device)
+    weight[0, 0] = 1.0
+    weight[1, 1] = 1.0
+    lm_head = SimpleNamespace(weight=weight)
+    lp = LogitsProcessor()
+    model = torch.nn.Module()
+    model.lp = lp
+    model.lm_head = lm_head
+    runner = SimpleNamespace(
+        is_draft_worker=False,
+        spec_algorithm=SimpleNamespace(is_dflash=lambda: True, name="DFLASH"),
+        model=model,
+        model_config=SimpleNamespace(vocab_size=n_vocab, hidden_size=hidden_dim),
+        server_args=SimpleNamespace(cuda_graph_max_bs_decode=16, speculative_num_draft_tokens=8),
+        decode_num_tokens_per_req=lambda: 8,
+    )
+    tp_w = SimpleNamespace(model_runner=runner)
+    dflash_w = SimpleNamespace(_target_worker=tp_w, _target_logits_processor=lp)
+    meta = SimpleNamespace(
+        forward_mode=_Mode(), extend_return_logprob=False, next_token_logits_buffer=None
+    )
+
+    def _orig_get_logits(_self, h, lm_h, _meta, embedding_bias=None, use_logits_buffer=True):
+        return torch.matmul(h, lm_h.weight.T)
+
+    h_static = torch.zeros((128, hidden_dim), dtype=torch.bfloat16, device=device)
+    graph = torch.cuda.CUDAGraph()
+    captured_slot: list[torch.Tensor] = []
+
+    def _capture_real_graph(_mr) -> None:
+        around_target_get_logits(_orig_get_logits, lp, h_static, lm_head, meta, use_logits_buffer=False)
+        with torch.cuda.graph(graph):
+            slot = around_target_get_logits(
+                _orig_get_logits, lp, h_static, lm_head, meta, use_logits_buffer=False
+            )
+            captured_slot.append(slot)
+
+    clear_target_verify_tls()
+    around_capture_decode_graph(_capture_real_graph, runner)
+    assert lp._sm89_graph_verify_captured is True
+    captured_ptr = lp._sm89_graph_hidden_arena.data_ptr()
+
+    def _make_h(rows: int, a: float, b: float) -> torch.Tensor:
+        h = torch.zeros((rows, hidden_dim), dtype=torch.bfloat16, device=device)
+        h[:, 0] = a
+        h[:, 1] = b
+        return h
+
+    mask_128 = torch.zeros((128, n_vocab // 32), dtype=torch.int32, device=device)
+    mask_128[:, 0] = 0b11
+
+    try:
+        # 1. Eager bs=24 (192 rows) producing [9.0, 11.0] without touching _sm89_graph_hidden_arena.
+        h_eager = _make_h(192, 9.0, 11.0)
+        _STEP_TLS.stack.append((dflash_w, SimpleNamespace(), None))
+        eager_out_holder: list[torch.Tensor] = []
+
+        def _eager_24(_tp, **_kw):
+            slot = around_target_get_logits(
+                _orig_get_logits, lp, h_eager, lm_head, meta, use_logits_buffer=False
+            )
+            eager_out_holder.append(slot)
+            return SimpleNamespace(
+                can_run_cuda_graph=False,
+                logits_output=SimpleNamespace(next_token_logits=slot),
+            )
+
+        around_tp_worker_forward_batch_generation(_eager_24, tp_w, is_verify=True)
+        materialize_deferred_target_logits()
+        _STEP_TLS.stack.pop()
+        clear_target_verify_tls()
+        assert torch.equal(
+            eager_out_holder[0][:, :2],
+            torch.tensor([[9.0, 11.0]], dtype=torch.bfloat16, device=device).expand(192, 2),
+        )
+        assert lp._sm89_graph_hidden_arena.data_ptr() == captured_ptr
+
+        # 2. Real CUDA Graph replay (128 rows) producing [2.0, 3.0] via both dense & sparse CUDA kernel.
+        h_static.copy_(_make_h(128, 2.0, 3.0))
+        for use_sparse in (False, True):
+            captured_slot[0].fill_(123.0)
+            _STEP_TLS.stack.append((dflash_w, SimpleNamespace(), None))
+
+            def _replay_16(_tp, **_kw):
+                graph.replay()
+                return SimpleNamespace(
+                    can_run_cuda_graph=True,
+                    logits_output=SimpleNamespace(next_token_logits=captured_slot[0]),
+                )
+
+            around_tp_worker_forward_batch_generation(_replay_16, tp_w, is_verify=True)
+            if use_sparse:
+                assert _VERIFY_TLS.pending is not None
+                _VERIFY_TLS.pending["vocab_mask_gpu"] = mask_128
+                _VERIFY_TLS.pending["use_sparse"] = True
+            materialize_deferred_target_logits()
+            _STEP_TLS.stack.pop()
+            clear_target_verify_tls()
+
+            assert torch.equal(
+                captured_slot[0][:, :2],
+                torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16, device=device).expand(128, 2),
+            )
+            if use_sparse:
+                assert torch.all(torch.isneginf(captured_slot[0][:, 2:]))
+        assert lp._sm89_graph_hidden_arena.data_ptr() == captured_ptr
+    finally:
+        while _STEP_TLS.stack:
+            _STEP_TLS.stack.pop()
+        clear_target_verify_tls()
+
+
 def run_all() -> None:
     assert torch.cuda.is_available()
     test_sparse_vocab_proj_tail_2051_dirty_bf16_fp8()

@@ -1,12 +1,12 @@
 # sglang-sm89
 
-**Ada Lovelace (`sm_89`) acceleration plugin for SGLang (`v0.5.23`)** (`v0.3.2`) — native `sm_89` CUDA/C++ kernels, a live GPU Block-FP8 autotuner, and `HookRegistry` runtime overlays for `RTX 4090`, `RTX 4090 D 48GB`, `RTX 6000 Ada`, and `L40S`, requiring **zero modifications** to upstream SGLang source files.
+**Ada Lovelace (`sm_89`) acceleration plugin for SGLang (`v0.5.23`)** (`v0.3.3`) — native `sm_89` CUDA/C++ kernels, a live GPU Block-FP8 autotuner, and `HookRegistry` runtime overlays for `RTX 4090`, `RTX 4090 D 48GB`, `RTX 6000 Ada`, and `L40S`, requiring **zero modifications** to upstream SGLang source files.
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 ---
 
-## Why `sglang-sm89` (`v0.3.2`)?
+## Why `sglang-sm89` (`v0.3.3`)?
 
 Modern hybrid linear-attention + GQA models (e.g., Qwen3.5 / Qwen3.8 Gated DeltaNet + GQA) paired with block-parallel speculative decoding (`DFLASH` / `DFlash2`) and CFG/JSON grammar enforcement (`xgrammar`) hit four Ada Lovelace (`sm_89`) bottlenecks out of the box:
 
@@ -26,7 +26,7 @@ Modern hybrid linear-attention + GQA models (e.g., Qwen3.5 / Qwen3.8 Gated Delta
 | **GDN `ReplaySSM` Pool Bridge** | [`sglang_sm89/gdn_pool_bridge.py`](sglang_sm89/gdn_pool_bridge.py) | Enables `GDN` `ReplaySSM BF16` allocation under `DFLASH` via a bounded sentinel hook and routes `HybridLinearAttnBackend.update_mamba_state_after_mtp_verify` through `ReplaySSM` circular/fold commit (`4.50×` KV pool capacity). |
 | **WY GDN `ReplaySSM` CUDA Kernel** | [`csrc/wy_gdn_sm89.cu`](csrc/wy_gdn_sm89.cu) + [`sglang_sm89/wy_gdn_verify.py`](sglang_sm89/wy_gdn_verify.py) | `sm_89` WY chunk-parallel forward-substitution kernel (`K=V=128`, `<8>` / `<16>` `kMaxSpec` templates, coalesced `uint4` `h0` loads, XOR-swizzled smem, `0` spills, adaptive BF16 crossover `SGLANG_SM89_WY_GDN_MAX_BF16_TOKENS=32`). |
 | **Fast C++ Coupled Grammar Resampling** | [`csrc/coupled_grammar_cpu.cpp`](csrc/coupled_grammar_cpu.cpp) + [`sglang_sm89/coupled_grammar.py`](sglang_sm89/coupled_grammar.py) | Theorem 1C/1D overlap-safe `grammar_barrier()` + `\|V_valid\|==1` jump-forward + native C++ (`coupled_refine_step_cpu`, `129.95 us`, `21.02×` vs Python) coupled resampling with `_selector_sample` parity, `SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS`, and `try...finally: rollback()` invariance. |
-| **DFlash-Scoped `_get_logits` + `kTileV=64` Sparse `lm_head`** | [`csrc/sparse_vocab_proj_sm89.cu`](csrc/sparse_vocab_proj_sm89.cu) + [`sglang_sm89/vocab_projection.py`](sglang_sm89/vocab_projection.py) | Scopes `LogitsProcessor._get_logits` capture to strict `SpeculativeAlgorithm.DFLASH` (`is_dflash()`, excluding `DSPARK`/`EAGLE`/other workers) and sizes pre-allocated arenas dynamically via `get_batch_sizes_to_capture(...) * decode_num_tokens_per_req()` alongside `TpModelWorker.forward_batch_generation(..., is_verify=True)` TLS guards, then materializes lazily via `kTileV=64` warp-ballot compaction and `select_sparse_vocab_proj`. |
+| **DFlash-Scoped `_get_logits` + `kTileV=64` Sparse `lm_head`** | [`csrc/sparse_vocab_proj_sm89.cu`](csrc/sparse_vocab_proj_sm89.cu) + [`sglang_sm89/vocab_projection.py`](sglang_sm89/vocab_projection.py) | Scopes `LogitsProcessor._get_logits` capture to strict `SpeculativeAlgorithm.DFLASH` (`is_dflash()`), separates immutable CUDA Graph arenas (`_sm89_graph_hidden_arena`, `_sm89_graph_logits_arena`, sized via `get_batch_sizes_to_capture(...) * decode_num_tokens_per_req()`) from growable runtime eager arenas (`_sm89_eager_*`) so mixed `graph -> large eager -> graph` steps never resize or clobber captured graph pointers, and materializes lazily via `kTileV=64` warp-ballot compaction and `select_sparse_vocab_proj`. |
 | **Optional $O(1)$ SAM Tail Drafter** | [`sglang_sm89/sam_drafter.py`](sglang_sm89/sam_drafter.py) | Opt-in (`SGLANG_SM89_SAM_GRAFT=0`) Suffix Automaton prompt continuation grafting on low-confidence tail draft slots. |
 
 ---
@@ -87,7 +87,7 @@ SGLang automatically discovers `sglang_sm89.plugin:register` via the `sglang.srt
 | `SGLANG_SM89_REPLAYSSM` | `1` | Unlock GDN `ReplaySSM BF16` allocation & commit under `DFLASH` |
 | `SGLANG_SM89_COUPLED_GRAMMAR` | `1` | Coupled grammar resampling + `\|V_valid\|==1` jump-forward (`coupled_refine_step_cpu`) |
 | `SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS` | `0` | Opt-in max batch size for sampled-batch coupled grammar refinement (`0` = unlimited / disabled in all published benchmarks; unbenchmarked opt-in cap when `> 0`, while greedy always runs) |
-| `SGLANG_SM89_SPARSE_PROJ` | `1` | Strict `DFLASH` `LogitsProcessor._get_logits` (`get_batch_sizes_to_capture(...) * decode_num_tokens_per_req()` arena) + `kTileV=64` sparse vocab projection + C++ roofline dispatch |
+| `SGLANG_SM89_SPARSE_PROJ` | `1` | Strict `DFLASH` `_get_logits` with immutable `_sm89_graph_*` vs growable `_sm89_eager_*` arenas + `kTileV=64` sparse vocab projection + C++ roofline dispatch |
 | `SGLANG_SM89_WY_GDN` | `1` | Native `sm_89` WY GDN `ReplaySSM` verify CUDA kernel |
 | `SGLANG_SM89_WY_GDN_MAX_BF16_TOKENS` | `32` | Adaptive BF16 crossover token limit (`<=32` CUDA `1.156×–1.800×`; `>32` Triton) |
 | `SGLANG_SM89_FP8_VERIFY_HEAD` | `0` | Opt-in rowwise FP8 target verify `lm_head` (`0` preserves exact BF16 logits) |
@@ -97,7 +97,7 @@ SGLang automatically discovers `sglang_sm89.plugin:register` via the `sglang.srt
 
 ## Measured Benchmarks (`NVIDIA GeForce RTX 4090 D 48GB`, `300 W`, `Qwen/Qwen3.8-27B-FP8`)
 
-All measurements below were recorded at `v0.3.0` on `NVIDIA GeForce RTX 4090 D` (`sm_89`, `300.0 W` power limit) serving `Qwen/Qwen3.8-27B-FP8` + `z-lab/Qwen3.8-27B-DFlash2` (`draft=8`, `kv_cache_dtype=fp8_e4m3`, `context_length=8192`, `--max-tokens 512`, `xgrammar 0.2.7`, read-only SQLite executable SQL + exact JSON ground-truth validation, untimed schema pre-warming via `prewarm_workloads`; `v0.3.1`/`v0.3.2` scope `_get_logits` capture strictly to `SpeculativeAlgorithm.DFLASH` (`is_dflash()`) and dynamically size capture arenas via `get_batch_sizes_to_capture(...) * decode_num_tokens_per_req()` without altering these kernel/grammar paths, and `SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS` was `0` = unlimited in all published runs). All `12` raw result artifacts live in [`benchmarks/results/`](benchmarks/results/).
+All measurements below were recorded at `v0.3.0` on `NVIDIA GeForce RTX 4090 D` (`sm_89`, `300.0 W` power limit) serving `Qwen/Qwen3.8-27B-FP8` + `z-lab/Qwen3.8-27B-DFlash2` (`draft=8`, `kv_cache_dtype=fp8_e4m3`, `context_length=8192`, `--max-tokens 512`, `xgrammar 0.2.7`, read-only SQLite executable SQL + exact JSON ground-truth validation, untimed schema pre-warming via `prewarm_workloads`; `v0.3.1`–`v0.3.3` scope `_get_logits` capture strictly to `SpeculativeAlgorithm.DFLASH` (`is_dflash()`), size capture arenas via `get_batch_sizes_to_capture(...) * decode_num_tokens_per_req()`, and isolate immutable `_sm89_graph_*` arenas from growable `_sm89_eager_*` arenas without altering these kernel/grammar paths, while `SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS` was `0` = unlimited in all published runs). All `12` raw result artifacts live in [`benchmarks/results/`](benchmarks/results/).
 
 ### 1. Stock SGLang `0.5.23` vs `sglang-sm89` ([`e2e_stock_vs_sm89_4090d.json`](benchmarks/results/e2e_stock_vs_sm89_4090d.json))
 
@@ -235,5 +235,5 @@ python3 benchmarks/bench_agentic_tool_chain.py --dry-run
 ## Provenance & License
 
 - **License:** Verbatim Apache License 2.0 ([`LICENSE`](LICENSE), `SPDX-License-Identifier: Apache-2.0`) and [`NOTICE`](NOTICE).
-- **Attribution & Independence Verification:** Builds upon upstream [`sgl-project/sglang`](https://github.com/sgl-project/sglang) runtime interfaces (`HookRegistry`, `DFlashWorkerV2`, `LogitsProcessor`, Triton kernels) and Apache-2.0 prior art in [`dashportai/dashport-4090d-infer`](https://github.com/dashportai/dashport-4090d-infer) on `RTX 4090 D` Block-FP8 and `DFlash2` acceleration. Every module, CUDA/C++ source, test, benchmark script, and profile in `sglang-sm89` `v0.3.2` is verified with an automated normalized Longest Common Substring check (`MAX_LCS <= 4`, zero `>= 5`-line contiguous overlaps against public and internal overlay repositories) and zero static Block-FP8 config JSON files.
-- **Git History Note:** Public `main` history was reset to a single release commit at `v0.2.0` (`07df620`), followed by fast-forward release commits for `v0.3.0` (`40194c7`), `v0.3.1` (`f7002bc`), and `v0.3.2`. An earlier unreferenced development commit (`a9157f3`) remains server-retained in GitHub object storage because the push OAuth token does not hold `delete_repo` scope; it contains zero secrets or credentials.
+- **Attribution & Independence Verification:** Builds upon upstream [`sgl-project/sglang`](https://github.com/sgl-project/sglang) runtime interfaces (`HookRegistry`, `DFlashWorkerV2`, `LogitsProcessor`, Triton kernels) and Apache-2.0 prior art in [`dashportai/dashport-4090d-infer`](https://github.com/dashportai/dashport-4090d-infer) on `RTX 4090 D` Block-FP8 and `DFlash2` acceleration. Every module, CUDA/C++ source, test, benchmark script, and profile in `sglang-sm89` `v0.3.3` is verified with an automated normalized Longest Common Substring check (`MAX_LCS <= 4`, zero `>= 5`-line contiguous overlaps against public and internal overlay repositories) and zero static Block-FP8 config JSON files.
+- **Git History Note:** Public `main` history was reset to a single release commit at `v0.2.0` (`07df620`), followed by fast-forward release commits for `v0.3.0` (`40194c7`), `v0.3.1` (`f7002bc`), `v0.3.2` (`96e5767`), and `v0.3.3`. An earlier unreferenced development commit (`a9157f3`) remains server-retained in GitHub object storage because the push OAuth token does not hold `delete_repo` scope; it contains zero secrets or credentials.
