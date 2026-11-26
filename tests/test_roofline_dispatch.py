@@ -128,7 +128,9 @@ def test_get_logits_deferral_state_machine_graph_prefill_replay(monkeypatch: pyt
     model.lm_head = lm_head
     model_runner = SimpleNamespace(
         is_draft_worker=False,
-        spec_algorithm=SimpleNamespace(is_dflash_family=lambda: True),
+        spec_algorithm=SimpleNamespace(
+            is_dflash=lambda: True, is_dflash_family=lambda: True, name="DFLASH"
+        ),
         model=model,
         model_config=SimpleNamespace(vocab_size=16, hidden_size=8),
         num_tokens_per_req=4,
@@ -385,7 +387,9 @@ def test_valid_dflash_capture_and_verify_eager_and_graph_dense_and_sparse(
     lp, model, lm_head, _w, hidden, ext_buf, meta, orig_fn = _make_23_fixture()
     model_runner = SimpleNamespace(
         is_draft_worker=False,
-        spec_algorithm=SimpleNamespace(is_dflash_family=lambda: True),
+        spec_algorithm=SimpleNamespace(
+            is_dflash=lambda: True, is_dflash_family=lambda: True, name="DFLASH"
+        ),
         model=model,
         model_config=SimpleNamespace(vocab_size=64, hidden_size=8),
         num_tokens_per_req=4,
@@ -614,3 +618,203 @@ def test_max_sampled_grammar_bs_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert d_u is True and q_u is True
     assert sum(g.fill_calls for g in grammars) > 0
+
+
+def test_codex_p1_dspark_capture_and_replay_computes_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DSPARK (is_dflash_family()=True, is_dflash()=False) capture + replay must compute [2, 3]."""
+    import sglang_sm89.vocab_projection as vp
+    from sglang_sm89.vocab_projection import (
+        _VERIFY_TLS,
+        around_capture_decode_graph,
+        around_target_get_logits,
+        around_tp_worker_forward_batch_generation,
+        clear_target_verify_tls,
+    )
+
+    clear_target_verify_tls()
+    lp, model, lm_head, _w, hidden, ext_buf, meta, orig_fn = _make_23_fixture()
+    dspark_runner = SimpleNamespace(
+        is_draft_worker=False,
+        spec_algorithm=SimpleNamespace(
+            is_dflash_family=lambda: True, is_dflash=lambda: False, name="DSPARK"
+        ),
+        model=model,
+        model_config=SimpleNamespace(vocab_size=64, hidden_size=8),
+        num_tokens_per_req=8,
+    )
+    dspark_tp = SimpleNamespace(model_runner=dspark_runner)
+
+    def _dspark_capture(_mr):
+        monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: True)
+        try:
+            out_cap = around_target_get_logits(orig_fn, lp, hidden, lm_head, meta)
+            assert torch.equal(
+                out_cap[:, :2], torch.tensor([[2.0, 3.0], [2.0, 3.0]], dtype=torch.bfloat16)
+            )
+            assert not torch.equal(out_cap[:, :2], torch.full((2, 2), 123.0, dtype=torch.bfloat16))
+        finally:
+            monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
+
+    around_capture_decode_graph(_dspark_capture, dspark_runner)
+    assert getattr(lp, "_sm89_verify_armed", False) is False
+    assert not hasattr(lp, "_sm89_verify_hidden_arena")
+
+    def _dspark_replay_fwd(_tp, **_kw):
+        out_run = around_target_get_logits(orig_fn, lp, hidden, lm_head, meta)
+        return SimpleNamespace(logits_output=SimpleNamespace(next_token_logits=out_run))
+
+    res = around_tp_worker_forward_batch_generation(_dspark_replay_fwd, dspark_tp, is_verify=True)
+    assert torch.equal(
+        res.logits_output.next_token_logits[:, :2],
+        torch.tensor([[2.0, 3.0], [2.0, 3.0]], dtype=torch.bfloat16),
+    )
+    assert torch.equal(ext_buf[:, :2], torch.full((4, 2), 123.0, dtype=torch.bfloat16))
+    assert getattr(lp, "_sm89_verify_armed", False) is False
+    assert _VERIFY_TLS.pending is None
+
+
+def test_codex_p2_large_capture_batch_bs24_draft8_192_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: bs=24 x draft=8 (192 rows) pre-allocates >=192 rows & materializes [192, V] w/o buffer."""
+    import sys
+    import types
+    import sglang_sm89.vocab_projection as vp
+    from sglang_sm89.coupled_grammar import _STEP_TLS
+    from sglang_sm89.vocab_projection import (
+        around_capture_decode_graph,
+        around_target_get_logits,
+        around_tp_worker_forward_batch_generation,
+        clear_target_verify_tls,
+        materialize_deferred_target_logits,
+    )
+
+    # Subcase A: real get_batch_sizes_to_capture path returning [1, 2, 4, 8, 16, 24]
+    clear_target_verify_tls()
+    lp, model, lm_head, weight, _h2, _ext, meta_base, orig_fn = _make_23_fixture()
+    h192 = torch.zeros((192, 8), dtype=torch.bfloat16)
+    h192[:, 0] = 1.0
+    h192[:, 1] = 1.0
+    meta_no_buf = SimpleNamespace(
+        forward_mode=meta_base.forward_mode,
+        extend_return_logprob=False,
+        next_token_logits_buffer=None,
+    )
+
+    base_runner_mod = types.ModuleType(
+        "sglang.srt.model_executor.runner.base_cuda_graph_runner"
+    )
+    seen_widths: list[int] = []
+
+    def _fake_get_bs(_mr, captured_req_width=None):
+        seen_widths.append(int(captured_req_width))
+        return [1, 2, 4, 8, 16, 24], 24
+
+    base_runner_mod.get_batch_sizes_to_capture = _fake_get_bs
+    monkeypatch.setitem(sys.modules, "sglang", types.ModuleType("sglang"))
+    monkeypatch.setitem(sys.modules, "sglang.srt", types.ModuleType("sglang.srt"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.model_executor", types.ModuleType("sglang.srt.model_executor"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.model_executor.runner", types.ModuleType("sglang.srt.model_executor.runner"))
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.model_executor.runner.base_cuda_graph_runner",
+        base_runner_mod,
+    )
+
+    runner_a = SimpleNamespace(
+        is_draft_worker=False,
+        spec_algorithm=SimpleNamespace(is_dflash=lambda: True, name="DFLASH"),
+        model=model,
+        model_config=SimpleNamespace(vocab_size=64, hidden_size=8),
+        decode_num_tokens_per_req=lambda: 8,
+    )
+    captured_logits_slots: list[torch.Tensor] = []
+
+    def _capture_192(_mr):
+        monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: True)
+        try:
+            slot = around_target_get_logits(
+                orig_fn, lp, h192, lm_head, meta_no_buf, use_logits_buffer=False
+            )
+            slot.fill_(123.0)
+            captured_logits_slots.append(slot)
+        finally:
+            monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
+
+    around_capture_decode_graph(_capture_192, runner_a)
+    assert seen_widths == [8]
+    assert lp._sm89_verify_hidden_arena.shape[0] >= 192
+    assert lp._sm89_verify_logits_arena.shape[0] >= 192
+    assert lp._sm89_verify_armed is True
+
+    tp_a = SimpleNamespace(model_runner=runner_a)
+    dflash_a = SimpleNamespace(_target_worker=tp_a, _target_logits_processor=lp)
+    _STEP_TLS.stack.append((dflash_a, SimpleNamespace(), None))
+    try:
+        def _replay_192(_tp, **_kw):
+            lp._sm89_verify_hidden_arena[:192].copy_(h192)
+            return SimpleNamespace(
+                logits_output=SimpleNamespace(next_token_logits=captured_logits_slots[0])
+            )
+
+        around_tp_worker_forward_batch_generation(_replay_192, tp_a, is_verify=True)
+        materialize_deferred_target_logits()
+        expected_192 = h192 @ weight.T
+        assert expected_192.shape == (192, 64)
+        assert torch.equal(captured_logits_slots[0], expected_192)
+        assert torch.equal(
+            captured_logits_slots[0][:, :2],
+            torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16).expand(192, 2),
+        )
+    finally:
+        _STEP_TLS.stack.pop()
+        clear_target_verify_tls()
+
+    # Subcase B: lightweight fallback mock without get_batch_sizes_to_capture
+    def _raise_bs(*_a, **_k):
+        raise RuntimeError("mock unavailable")
+
+    monkeypatch.setattr(base_runner_mod, "get_batch_sizes_to_capture", _raise_bs)
+    lp_b, model_b, lm_head_b, weight_b, _, _, _, orig_fn_b = _make_23_fixture()
+    runner_b = SimpleNamespace(
+        is_draft_worker=False,
+        spec_algorithm=SimpleNamespace(is_dflash=lambda: True, name="DFLASH"),
+        model=model_b,
+        model_config=SimpleNamespace(vocab_size=64, hidden_size=8),
+        server_args=SimpleNamespace(cuda_graph_max_bs_decode=24, speculative_num_draft_tokens=8),
+    )
+    slots_b: list[torch.Tensor] = []
+
+    def _capture_192_b(_mr):
+        monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: True)
+        try:
+            slot = around_target_get_logits(
+                orig_fn_b, lp_b, h192, lm_head_b, meta_no_buf, use_logits_buffer=False
+            )
+            slot.fill_(123.0)
+            slots_b.append(slot)
+        finally:
+            monkeypatch.setattr(vp, "_is_cuda_capturing", lambda _dev: False)
+
+    around_capture_decode_graph(_capture_192_b, runner_b)
+    assert lp_b._sm89_verify_hidden_arena.shape[0] >= 192
+    assert lp_b._sm89_verify_logits_arena.shape[0] >= 192
+
+    tp_b = SimpleNamespace(model_runner=runner_b)
+    dflash_b = SimpleNamespace(_target_worker=tp_b, _target_logits_processor=lp_b)
+    _STEP_TLS.stack.append((dflash_b, SimpleNamespace(), None))
+    try:
+        def _replay_192_b(_tp, **_kw):
+            lp_b._sm89_verify_hidden_arena[:192].copy_(h192)
+            return SimpleNamespace(
+                logits_output=SimpleNamespace(next_token_logits=slots_b[0])
+            )
+
+        around_tp_worker_forward_batch_generation(_replay_192_b, tp_b, is_verify=True)
+        materialize_deferred_target_logits()
+        assert torch.equal(slots_b[0], h192 @ weight_b.T)
+    finally:
+        _STEP_TLS.stack.pop()
+        clear_target_verify_tls()

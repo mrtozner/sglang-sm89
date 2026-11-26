@@ -1,4 +1,4 @@
-"""Unified SGLang HookRegistry entry point for sglang-sm89 v0.3.1."""
+"""Unified SGLang HookRegistry entry point for sglang-sm89 v0.3.2."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def register() -> None:
             pass
 
     logger.info(
-        "[sglang_sm89] Registered v0.3.1 hooks (fp8_configs=%s dflash_fp8=%s replayssm=%s "
+        "[sglang_sm89] Registered v0.3.2 hooks (fp8_configs=%s dflash_fp8=%s replayssm=%s "
         "coupled_grammar=%s sparse_proj=%s wy_gdn=%s sam_graft=%s ext_loaded=%s)",
         fp8_configs_on,
         dflash_fp8_on,

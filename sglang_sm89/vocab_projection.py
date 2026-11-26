@@ -235,15 +235,128 @@ def _find_single_logits_processor(model: Any) -> Any:
     return found[0] if len(found) == 1 else None
 
 
+def _extract_hint_bs(src: Any, seq_keys: tuple[str, ...], scalar_keys: tuple[str, ...]) -> list[int]:
+    if src is None:
+        return []
+    vals: list[int] = []
+    for k in seq_keys:
+        raw = src.get(k) if isinstance(src, dict) else getattr(src, k, None)
+        if raw is not None and not isinstance(raw, (str, bytes)):
+            try:
+                items = [int(x) for x in raw if int(x) > 0]
+            except TypeError:
+                items = []
+            if items:
+                vals.append(max(items))
+    for k in scalar_keys:
+        raw = src.get(k) if isinstance(src, dict) else getattr(src, k, None)
+        if raw is not None:
+            try:
+                ival = int(raw)
+            except (TypeError, ValueError):
+                ival = 0
+            if ival > 0:
+                vals.append(ival)
+    return vals
+
+
+def _resolve_dflash_capture_arena_rows(
+    model_runner: Any, kwargs: Optional[dict[str, Any]] = None
+) -> int:
+    """Resolve verify scratch arena row capacity from SGLang decode graph sizing."""
+    kw = kwargs or {}
+    decode_nt_fn = getattr(model_runner, "decode_num_tokens_per_req", None)
+    if callable(decode_nt_fn):
+        raw_nt = decode_nt_fn()
+    else:
+        raw_nt = (
+            kw.get("num_tokens_per_req")
+            or getattr(model_runner, "num_tokens_per_req", None)
+            or getattr(getattr(model_runner, "server_args", None), "speculative_num_draft_tokens", None)
+            or getattr(model_runner, "speculative_num_draft_tokens", None)
+            or 16
+        )
+    num_tokens_per_req = max(1, int(raw_nt))
+
+    max_capture_bs: Optional[int] = None
+    try:
+        from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
+            get_batch_sizes_to_capture,
+        )
+
+        capture_bs, _ = get_batch_sizes_to_capture(
+            model_runner, captured_req_width=num_tokens_per_req
+        )
+        if capture_bs:
+            max_capture_bs = max(int(x) for x in capture_bs)
+    except Exception:
+        max_capture_bs = None
+
+    if max_capture_bs is None:
+        seq_keys = ("capture_bs", "cuda_graph_bs")
+        scalar_keys = (
+            "max_bs",
+            "cuda_graph_max_bs_decode",
+            "cuda_graph_max_bs",
+            "max_running_requests",
+        )
+        candidates: list[int] = []
+        for src in (kw, model_runner, getattr(model_runner, "server_args", None)):
+            candidates.extend(_extract_hint_bs(src, seq_keys, scalar_keys))
+
+        exec_bs: Optional[int] = None
+        for mod_name in (
+            "sglang.srt.configs.exec_config",
+            "sglang.srt.execution.config",
+            "sglang.srt.server_args",
+        ):
+            try:
+                mod = __import__(mod_name, fromlist=["get_exec"])
+                get_exec_fn = getattr(mod, "get_exec", None)
+                if callable(get_exec_fn):
+                    ex = get_exec_fn()
+                    dec_bs = getattr(
+                        getattr(getattr(ex, "graph", None), "cuda_graph_config", None),
+                        "decode",
+                        None,
+                    )
+                    bs_val = getattr(dec_bs, "bs", None)
+                    if bs_val is not None and not isinstance(bs_val, (str, bytes)):
+                        pos = [int(x) for x in bs_val if int(x) > 0]
+                        if pos:
+                            exec_bs = max(pos)
+                            break
+                    elif bs_val is not None and int(bs_val) > 0:
+                        exec_bs = int(bs_val)
+                        break
+            except Exception:
+                continue
+
+        if exec_bs is not None:
+            pool_size = getattr(getattr(model_runner, "req_to_token_pool", None), "size", None)
+            if pool_size is not None and int(pool_size) > 0:
+                exec_bs = min(exec_bs, int(pool_size))
+            candidates.append(exec_bs)
+
+        resolved = max(candidates) if candidates else 16
+        max_capture_bs = max(16, resolved)
+
+    return max(64, int(max_capture_bs) * int(num_tokens_per_req))
+
+
 def around_capture_decode_graph(original_fn, *args, **kwargs):
     """Pre-allocate target verify arenas and scope _VERIFY_TLS during DFlash graph capture."""
     model_runner = kwargs.get("model_runner") or (args[0] if args else None)
     spec_algo = getattr(model_runner, "spec_algorithm", None) if model_runner is not None else None
-    is_dflash_fn = getattr(spec_algo, "is_dflash_family", None)
+    is_dflash_fn = getattr(spec_algo, "is_dflash", None)
     is_dflash = (
         model_runner is not None
         and not getattr(model_runner, "is_draft_worker", False)
-        and bool(is_dflash_fn() if callable(is_dflash_fn) else is_dflash_fn)
+        and (
+            bool(is_dflash_fn())
+            if callable(is_dflash_fn)
+            else getattr(spec_algo, "name", None) == "DFLASH"
+        )
     )
     if not is_dflash:
         return original_fn(*args, **kwargs)
@@ -275,14 +388,7 @@ def around_capture_decode_graph(original_fn, *args, **kwargs):
         if weight is not None
         else torch.device(getattr(model_runner, "device", "cpu"))
     )
-    num_tokens_per_req = (
-        kwargs.get("num_tokens_per_req")
-        or getattr(model_runner, "num_tokens_per_req", None)
-        or getattr(getattr(model_runner, "server_args", None), "speculative_num_draft_tokens", None)
-        or getattr(model_runner, "speculative_num_draft_tokens", None)
-        or 16
-    )
-    arena_rows = max(64, 16 * int(num_tokens_per_req))
+    arena_rows = _resolve_dflash_capture_arena_rows(model_runner, kwargs)
     if hidden_dim > 0 and n_vocab > 0 and not _is_cuda_capturing(device):
         _borrow_arena_slice(lp, "_sm89_verify_hidden_arena", arena_rows, hidden_dim, device)
         _borrow_arena_slice(lp, "_sm89_verify_logits_arena", arena_rows, n_vocab, device)
