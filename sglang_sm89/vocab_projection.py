@@ -23,6 +23,8 @@ class _VerifyTicketTLS(threading.local):
     def __init__(self) -> None:
         super().__init__()
         self.pending: Optional[dict[str, Any]] = None
+        self.capturing_dflash_lp: Any = None
+        self.active_dflash_lp: Any = None
 
 
 _VERIFY_TLS = _VerifyTicketTLS()
@@ -216,6 +218,83 @@ def _get_fp8_verify_bundle(lp_self: Any, weight: torch.Tensor):
     return bundle
 
 
+def _find_single_logits_processor(model: Any) -> Any:
+    modules_fn = getattr(model, "modules", None)
+    if not callable(modules_fn):
+        return None
+    try:
+        from sglang.srt.layers.logits_processor import LogitsProcessor as _SglangLP
+    except Exception:
+        _SglangLP = None
+    found = []
+    for mod in modules_fn():
+        if (_SglangLP is not None and isinstance(mod, _SglangLP)) or (
+            type(mod).__name__ == "LogitsProcessor"
+        ):
+            found.append(mod)
+    return found[0] if len(found) == 1 else None
+
+
+def around_capture_decode_graph(original_fn, *args, **kwargs):
+    """Pre-allocate target verify arenas and scope _VERIFY_TLS during DFlash graph capture."""
+    model_runner = kwargs.get("model_runner") or (args[0] if args else None)
+    spec_algo = getattr(model_runner, "spec_algorithm", None) if model_runner is not None else None
+    is_dflash_fn = getattr(spec_algo, "is_dflash_family", None)
+    is_dflash = (
+        model_runner is not None
+        and not getattr(model_runner, "is_draft_worker", False)
+        and bool(is_dflash_fn() if callable(is_dflash_fn) else is_dflash_fn)
+    )
+    if not is_dflash:
+        return original_fn(*args, **kwargs)
+
+    model = getattr(model_runner, "model", None)
+    lp = _find_single_logits_processor(model)
+    if lp is None:
+        return original_fn(*args, **kwargs)
+
+    lm_head = getattr(model, "lm_head", None)
+    weight = getattr(lm_head, "weight", None)
+    model_cfg = getattr(model_runner, "model_config", None)
+    hidden_dim = (
+        int(weight.shape[1])
+        if weight is not None
+        else int(
+            getattr(model_cfg, "hidden_size", None)
+            or getattr(getattr(model_cfg, "hf_config", None), "hidden_size", 0)
+            or 0
+        )
+    )
+    n_vocab = (
+        int(weight.shape[0])
+        if weight is not None
+        else int(getattr(model_cfg, "vocab_size", 0) or 0)
+    )
+    device = (
+        weight.device
+        if weight is not None
+        else torch.device(getattr(model_runner, "device", "cpu"))
+    )
+    num_tokens_per_req = (
+        kwargs.get("num_tokens_per_req")
+        or getattr(model_runner, "num_tokens_per_req", None)
+        or getattr(getattr(model_runner, "server_args", None), "speculative_num_draft_tokens", None)
+        or getattr(model_runner, "speculative_num_draft_tokens", None)
+        or 16
+    )
+    arena_rows = max(64, 16 * int(num_tokens_per_req))
+    if hidden_dim > 0 and n_vocab > 0 and not _is_cuda_capturing(device):
+        _borrow_arena_slice(lp, "_sm89_verify_hidden_arena", arena_rows, hidden_dim, device)
+        _borrow_arena_slice(lp, "_sm89_verify_logits_arena", arena_rows, n_vocab, device)
+
+    prev_capturing = getattr(_VERIFY_TLS, "capturing_dflash_lp", None)
+    _VERIFY_TLS.capturing_dflash_lp = lp
+    try:
+        return original_fn(*args, **kwargs)
+    finally:
+        _VERIFY_TLS.capturing_dflash_lp = prev_capturing
+
+
 def around_target_get_logits(
     original_fn,
     lp_self,
@@ -225,9 +304,18 @@ def around_target_get_logits(
     embedding_bias: Optional[torch.Tensor] = None,
     use_logits_buffer: bool = True,
 ) -> torch.Tensor:
-    """Defer TARGET_VERIFY projection inside LogitsProcessor._get_logits until mask builds."""
+    """Defer DFlash TARGET_VERIFY projection inside LogitsProcessor._get_logits until mask builds."""
+    in_dflash_capture = (
+        _is_cuda_capturing(hidden_states.device)
+        and getattr(_VERIFY_TLS, "capturing_dflash_lp", None) is lp_self
+    )
+    in_dflash_step = getattr(_VERIFY_TLS, "active_dflash_lp", None) is lp_self
     fmode = getattr(logits_metadata, "forward_mode", None)
-    if fmode is None or not fmode.is_target_verify():
+    if (
+        not (in_dflash_capture or in_dflash_step)
+        or fmode is None
+        or not fmode.is_target_verify()
+    ):
         return original_fn(
             lp_self,
             hidden_states,
@@ -292,33 +380,45 @@ def around_target_get_logits(
     return logits_slot
 
 
-def after_tp_worker_forward_batch_generation(result, tp_worker, *args, **kwargs):
-    """Store deferred TARGET_VERIFY work ticket once target forward completes."""
+def around_tp_worker_forward_batch_generation(original_fn, tp_worker, *args, **kwargs):
+    """Scope active DFlash LogitsProcessor around target verify forward and store ticket."""
     if not (_STEP_TLS.stack and kwargs.get("is_verify", False)):
-        return result
+        return original_fn(tp_worker, *args, **kwargs)
 
-    active_worker = _STEP_TLS.stack[-1][0]
-    lp = getattr(active_worker, "_target_logits_processor", None)
-    if lp is None or not getattr(lp, "_sm89_verify_armed", False):
-        return result
-    if getattr(lp, "_sm89_eager_verify_bypassed", False):
-        lp._sm89_eager_verify_bypassed = False
-        return result
+    active_dflash = _STEP_TLS.stack[-1][0]
+    target_worker = getattr(active_dflash, "_target_worker", None) or getattr(
+        active_dflash, "target_worker", None
+    )
+    active_lp = getattr(active_dflash, "_target_logits_processor", None)
+    if tp_worker is not target_worker or active_lp is None:
+        return original_fn(tp_worker, *args, **kwargs)
 
-    logits_output = getattr(result, "logits_output", None)
-    hidden_arena = getattr(lp, "_sm89_verify_hidden_arena", None)
+    prev_active = getattr(_VERIFY_TLS, "active_dflash_lp", None)
+    _VERIFY_TLS.active_dflash_lp = active_lp
+    try:
+        res = original_fn(tp_worker, *args, **kwargs)
+    finally:
+        _VERIFY_TLS.active_dflash_lp = prev_active
+
+    bypassed = bool(getattr(active_lp, "_sm89_eager_verify_bypassed", False))
+    active_lp._sm89_eager_verify_bypassed = False
+    if not getattr(active_lp, "_sm89_verify_armed", False) or bypassed:
+        return res
+
+    logits_output = getattr(res, "logits_output", None)
+    hidden_arena = getattr(active_lp, "_sm89_verify_hidden_arena", None)
     out_tensor = getattr(logits_output, "next_token_logits", None)
     if hidden_arena is None or out_tensor is None:
-        return result
+        return res
 
     lm_head = getattr(tp_worker.model_runner.model, "lm_head", None)
     weight = getattr(lm_head, "weight", None)
     if weight is None:
-        return result
+        return res
 
     m_rows = int(out_tensor.shape[0])
     _VERIFY_TLS.pending = {
-        "lp": lp,
+        "lp": active_lp,
         "hidden": hidden_arena[:m_rows],
         "weight": weight,
         "out": out_tensor,
@@ -326,7 +426,7 @@ def after_tp_worker_forward_batch_generation(result, tp_worker, *args, **kwargs)
         "use_sparse": False,
         "done": False,
     }
-    return result
+    return res
 
 
 def around_build_grammar_vocab_mask(original_fn, *args, **kwargs):
@@ -404,6 +504,20 @@ def materialize_deferred_target_logits() -> None:
 
 def clear_target_verify_tls() -> None:
     _VERIFY_TLS.pending = None
+    _VERIFY_TLS.active_dflash_lp = None
+    _VERIFY_TLS.capturing_dflash_lp = None
+
+
+def around_dflash_step_for_vocab(original_fn, worker, *args, **kwargs):
+    """Idempotently wrap DFlashWorkerV2.forward_batch_generation when registered standalone."""
+    if _STEP_TLS.stack and _STEP_TLS.stack[-1][0] is worker:
+        return original_fn(worker, *args, **kwargs)
+    from .coupled_grammar import around_dflash_forward_batch_generation
+
+    try:
+        return around_dflash_forward_batch_generation(original_fn, worker, *args, **kwargs)
+    finally:
+        clear_target_verify_tls()
 
 
 def before_apply_dflash_verify_logits_adjustments(*_args, **_kwargs) -> None:
@@ -414,7 +528,9 @@ def before_dflash_accept_block(*_args, **_kwargs) -> None:
     materialize_deferred_target_logits()
 
 
-def register_hooks(HookRegistry=None, HookType=None) -> None:
+def register_hooks(
+    HookRegistry=None, HookType=None, *, install_wrapper_on_step: bool = True
+) -> None:
     if HookRegistry is None or HookType is None:
         from sglang.srt.plugins.hook_registry import HookRegistry as _HR
         from sglang.srt.plugins.hook_registry import HookType as _HT
@@ -422,32 +538,48 @@ def register_hooks(HookRegistry=None, HookType=None) -> None:
         HookRegistry = _HR
         HookType = _HT
 
-    hook_specs = (
+    hook_specs = []
+    if install_wrapper_on_step:
+        hook_specs.append(
+            (
+                "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2.forward_batch_generation",
+                around_dflash_step_for_vocab,
+                HookType.AROUND,
+            )
+        )
+    hook_specs.extend(
         (
-            "sglang.srt.layers.logits_processor.LogitsProcessor._get_logits",
-            around_target_get_logits,
-            HookType.AROUND,
-        ),
-        (
-            "sglang.srt.managers.tp_worker.TpModelWorker.forward_batch_generation",
-            after_tp_worker_forward_batch_generation,
-            HookType.AFTER,
-        ),
-        (
-            "sglang.srt.speculative.spec_utils.build_grammar_vocab_mask",
-            around_build_grammar_vocab_mask,
-            HookType.AROUND,
-        ),
-        (
-            "sglang.srt.speculative.dflash_worker_v2.apply_dflash_verify_logits_adjustments",
-            before_apply_dflash_verify_logits_adjustments,
-            HookType.BEFORE,
-        ),
-        (
-            "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2._accept_block",
-            before_dflash_accept_block,
-            HookType.BEFORE,
-        ),
+            (
+                "sglang.srt.model_executor.model_runner_components.cuda_graph_setup.capture_decode_graph",
+                around_capture_decode_graph,
+                HookType.AROUND,
+            ),
+            (
+                "sglang.srt.layers.logits_processor.LogitsProcessor._get_logits",
+                around_target_get_logits,
+                HookType.AROUND,
+            ),
+            (
+                "sglang.srt.managers.tp_worker.TpModelWorker.forward_batch_generation",
+                around_tp_worker_forward_batch_generation,
+                HookType.AROUND,
+            ),
+            (
+                "sglang.srt.speculative.spec_utils.build_grammar_vocab_mask",
+                around_build_grammar_vocab_mask,
+                HookType.AROUND,
+            ),
+            (
+                "sglang.srt.speculative.dflash_worker_v2.apply_dflash_verify_logits_adjustments",
+                before_apply_dflash_verify_logits_adjustments,
+                HookType.BEFORE,
+            ),
+            (
+                "sglang.srt.speculative.dflash_worker_v2.DFlashWorkerV2._accept_block",
+                before_dflash_accept_block,
+                HookType.BEFORE,
+            ),
+        )
     )
     for target_path, fn, htype in hook_specs:
         HookRegistry.register(target_path, fn, htype)

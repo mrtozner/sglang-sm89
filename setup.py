@@ -20,7 +20,7 @@ NVCC_OPTS = [
 
 setup(
     name="sglang-sm89",
-    version="0.3.0",
+    version="0.3.1",
     description="Ada Lovelace (sm_89) SGLang speculative & constrained decoding acceleration",
     license="Apache-2.0",
     packages=find_packages(include=["sglang_sm89*"]),

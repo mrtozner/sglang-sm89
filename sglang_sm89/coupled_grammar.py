@@ -304,6 +304,9 @@ def apply_coupled_conditional_resampling(
     Returns ``(draft_changed, cand_changed, q_changed)`` so callers only upload mutated buffers.
     """
     bs, block_size = int(draft_cpu.shape[0]), int(draft_cpu.shape[1])
+    max_sampled_bs = int(os.getenv("SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS", "0"))
+    if max_sampled_bs > 0 and bs > max_sampled_bs and any(not g for g in (greedy_flags or ())):
+        return False, False, False
     vocab_words = (vocab_size + 31) // 32
     mask_buf = _borrow_bitmask_row(vocab_words)
     mask_row = mask_buf[0]
@@ -533,6 +536,11 @@ def around_grammar_tree_from_linear_chain(original_fn, cls, verify_ids_2d: torch
     greedy_flags = resolve_batch_greedy_flags(
         getattr(batch, "sampling_info", None), bs, reqs=reqs
     )
+    max_sampled_bs = int(os.getenv("SGLANG_SM89_MAX_SAMPLED_GRAMMAR_BS", "0"))
+    if max_sampled_bs > 0 and bs > max_sampled_bs and (
+        any(not g for g in greedy_flags) or selector_sample is not None
+    ):
+        return original_fn(cls, verify_ids_2d)
     allow_forced = os.getenv("SGLANG_SM89_JUMP_FORWARD", "1").strip() != "0"
 
     if verify_ids_2d.is_cuda:
